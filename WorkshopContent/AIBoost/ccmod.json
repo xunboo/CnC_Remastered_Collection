@@ -1,9 +1,9 @@
 {
-"name": "AI Boost 3.2 - By Bast75 & xXMini FrankiXx", 
-"description": "# AI-Boost for Red Alert\r\nThis is my personal AI-Boost mod for RA.\r\nI've added some changes to improve the AI.\r\n\r\nThe AI handles his cash flow and building priorities/limits a lot smarter.\r\nIt doesn't wait for the player to let his base grow and/or tech up to the highest level.\r\nThe AI monitors what you are doing and uses this on how to react while upgrading his base.\r\nMore Factories, Air stuff, Air defence or Refineries if you have created more of this.\r\nIt activates Naval if u go Naval to. (And yes, they work also.)\r\nEtc.\r\nIt's totally dynamic. :-)\r\n\r\nIt now also produces/uses the following:\r\nDemo truck, Chrono Tank, Kennel/Dog, MAD Tank, Flamethrower, Shock Troopers, Medic, Mechanic, Spy, Thief, Gap generator, repair bay and the Nuclear Missile Silo.\r\nAt a certain point, it creates an MCV and depoys it close to Tiberium to start a extra base.\r\n\r\nNote:\r\nThe more Tiberium is available on the map, the harder it gets to beat this AI.\r\nYou might need a faster pc because of the amount of units etc.  :-)\r\n\r\nExtra changes:\r\nSight range of the MCV is increased, this was needed to get the AI to find a deploy spot.\r\nThe point values of some important buildings are changed, so the AI understands the threat to target this first or not.\r\n\r\nNew:\r\nMade the AI in different levels, choose the difficulty before starting the game. :-)\r\n\r\nGreetings and have fun.\r\nBast75.\r\n",
-"author": "Bast75",
-"load_order": 1,
-"version_low": 2,
-"version_high": 3,
-"game_type": "RA"
+  "name": "AI-Boost 4.0 for Red Alert",
+  "description": "# AI-Boost 4.0 for Red Alert\r\nSource update: 4 October 2026\r\n\r\nAI-Boost 4.0 builds on AI-Boost 3.2b by Bast75 and xXMini FrankiXx.\r\n\r\nMain updates:\r\n- AI unit production responds to enemy armor, infantry, aircraft, and defenses.\r\n- Economy recovery prioritizes replacing harvesters and restoring construction capability.\r\n- Strategy selection checks feasible technology and naval placement, with automatic transitions when rushes are countered.\r\n- Enemy threat information, per-house production budgets, and naval limits are refreshed correctly.\r\n- Attack waves preserve harvesting, base expansion, teams, and units already fighting. Chrono Tanks check targets and landing cells.\r\n- Nearby target selection retains the strongest eligible target.\r\n- A sprite-renderer address-calculation defect that caused terrain-drawing startup crashes is repaired.\r\n\r\nThe repository includes build instructions and AI/renderer regression checks. Full live-match startup and competitive strength still require playtesting.\r\n\r\nSource, configuration, release notes, and original mod credits:\r\nhttps://github.com/xunboo/CnC_Remastered_Collection\r\n",
+  "author": "Bast75",
+  "load_order": 1,
+  "version_low": 2,
+  "version_high": 3,
+  "game_type": "RA"
 }
