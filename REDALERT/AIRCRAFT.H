@@ -142,7 +142,7 @@ class AircraftClass : public FootClass, public FlyClass
 		/*
 		**	Combat related.
 		*/
-		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced=false);
+		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced=false, TARGET indirectsource = TARGET_NONE, ArmorPenType specialarmorpen = ARMORPEN_NONE); // Chthon CFE Note: Added indirectsource so minelayers can get XP
 		virtual BulletClass * Fire_At(TARGET target, int which);
 
 		/*
@@ -174,6 +174,10 @@ class AircraftClass : public FootClass, public FlyClass
 		bool Save(Pipe & file) const;
 
 		virtual unsigned Spied_By() const;
+        
+        // Chthon CFE Note: logic for exiting repair bay
+        bool DoSmarterRunAway();
+
 
 	public:
 
@@ -243,9 +247,21 @@ class AircraftClass : public FootClass, public FlyClass
 		*/
 		char AttacksRemaining;
 
+        // Chthon CFE Note: Cannot initialize variables here! RA's savegame loading copies the data then calls new. WTF?!
+        // Do it in the constructor instead.
+        
+         // Chthon CFE Note: Counter for helicopters to recheck target's location
+public:
+        unsigned short int TargetRecheckCounter;
+                
+private:
+    
 		/*
 		** Some additional padding in case we need to add data to the class and maintain backwards compatibility for save/load
 		*/
+        //  Chthon CFE Note: original padding was 32 bytes
+        // TargetRecheckCounter eats 2 bytes
+        // RESET PADDING in v1.8 b/c we're breaking save compatibility anyway
 		unsigned char SaveLoadPadding[32];
 };
 

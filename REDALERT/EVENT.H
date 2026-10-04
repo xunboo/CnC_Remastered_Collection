@@ -97,6 +97,9 @@ class EventClass
 			RETRACT_DRAW,		//	Player retracts proposed draw offer.
 #endif
 
+			//CFE Patch events
+			SET_RALLY,
+
 			LAST_EVENT,			// one past the last event
 		} EventType;
 

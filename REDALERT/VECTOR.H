@@ -96,6 +96,11 @@ class VectorClass
 		virtual int ID(T const * ptr);	// Pointer based identification.
 		virtual int ID(T const & ptr);	// Value based identification.
 
+		// cfehunter 12/06/2020 Make vectors standard begin/end compliant
+		T* begin() { return Vector; }
+		T* end() { return Vector + Length(); }
+		const T* begin() const { return Vector; }
+		const T* end() const { return Vector + VectorMax; }
 	protected:
 
 		/*
@@ -161,6 +166,11 @@ class DynamicVectorClass : public VectorClass<T>
 
 		virtual int ID(T const * ptr) {return(VectorClass<T>::ID(ptr));};
 		virtual int ID(T const & ptr);
+
+		T* begin() { return Vector; }
+		T* end() { return begin() + Count(); }
+		const T* begin() const { return Vector; }
+		const T* end() const { return begin() + Count(); }
 
 	protected:
 

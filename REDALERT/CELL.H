@@ -288,13 +288,17 @@ class CellClass
 		*/
 		bool Grow_Tiberium(void);
 		bool Spread_Tiberium(bool forced=false);
+        bool CFESpread_Tiberium(bool forced=false); //Chthon CFE Note: for better ore growth
+        bool CFEOreMineSpread_Tiberium(); //Chthon CFE Note: for better ore growth, special function for ore mines
+        bool DumpOreHere(); // Chthon CFE Note: harvester dumps ore into the cell (to make room for gems)
 		long Tiberium_Adjust(bool pregame=false);
 		void Wall_Update(void);
 		void Concrete_Calc(void);
 		void Recalc_Attributes(void);
 		int  Reduce_Tiberium(int levels);
 		int  Reduce_Wall(int damage);
-		void Incoming(COORDINATE threat=0, bool forced=false, bool nokidding=false);
+        // Chthon CFE Note: added parameter for scattering only veteran infantry
+		void Incoming(COORDINATE threat=0, bool forced=false, bool nokidding=false, bool veteransonly = false);
 		void Adjust_Threat(HousesType house, int threat_value);
 
 		int operator != (CellClass const &) const {return 0;}

@@ -1,0 +1,77 @@
+
+Some maps to test the AI.
+Place these files in: Documents\CnCRemastered\Local_Custom_Maps\Red_Alert\
+You can disable or add extra options in the .mpr file. (Just open this in notepad and use settings from aiboost.ini)
+
+
+****AItest-Ground****
+Just a large map with a lot of cash and room to build.
+[AIBoost]
+NoShroud=true
+
+
+****AItest-GroundCurtainChrono****
+Same map, but with some prebuild buildings for Human and 2 AI's.
+Place yourself at bottom, left side
+Place the first AI at right, top side
+Place the second AI at top, right side
+Make one of the AI's your friend
+[AIBoost]
+NoShroud=true
+AIAllowLastMCVToDoSecondBase=true
+AIAllowMoreMCVsToExtraBase=true
+AIMaxMCVOrConYardsInMainBase=1
+AIAllowChronoSphere=true
+AIAllowIronCurtain=true
+
+
+****AItest-Naval****
+A naval map with islands, not mutch space, but nice to test Naval and ChronoSphere stuff
+[AIBoost]
+NoShroud=true
+AIAllowLastMCVToDoSecondBase=true
+AIAllowMoreMCVsToExtraBase=true
+AIMaxMCVOrConYardsInMainBase=1
+[Recharge]
+Chrono=2
+GPS=1
+
+
+****AItest-NavalCurtainChrono****
+Same map, but with some prebuild buildings for Human and 2 AI's.
+Place yourself at the left bottom.
+Place the first AI at top left
+Place the second AI at top right
+Make one of the AI's your friend
+[AIBoost]
+NoShroud=true
+AIAllowLastMCVToDoSecondBase=true
+AIAllowMoreMCVsToExtraBase=true
+AIMaxMCVOrConYardsInMainBase=1
+AIAllowChronoSphere=true
+AIAllowIronCurtain=true
+[Recharge]
+Chrono=2
+GPS=1
+
+
+***Production Test***
+Map with prebuilt weapon factories for each AI(2,4,6,8)
+Place yourself at the top left
+Place the rest of the AI in order (left to right, top to bottom)
+[AIBoost]
+NoShroud=true
+AIMoreStartingCash=1000000
+
+
+***Production Test XL and XXL***
+Same as above, but more houses and more factories to test extreme productions in late game
+[AIBoost]
+NoShroud=true
+AIMoreStartingCash=1000000
+AIBoostDebug=true
+
+
+
+Have fun.
+Bast75 and MiniFranki

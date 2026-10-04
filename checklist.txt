@@ -1,0 +1,75 @@
+
+Checks to do before launching the game on Steam:
+-Harvester run away bug, still fixed? OK
+-Harvester memory enabled/disabled works and is different? OK
+-Pathfinding for naval units still oke? OK
+-pathfinding for normal units still oke? OK
+-Attack move works on infantry? OK
+-Queue move works on infantry? OK
+-Queue Attack move works on infantry? OK
+-Queue move works on tanks? OK
+-Attack move works on tanks? OK
+-Queue Attack move works on tanks? OK
+-Queue move works on air units? OK
+-Attack move works on air units? OK
+-Queue Attack move works on air units? OK
+-Queue move works on vessels? OK
+-Attack move works on vessels? OK
+-Queue Attack move works on vessels? OK
+-Aftermath Fast Build works?
+-Speed rush works?
+-Instant capture works? OK
+-Chronosphere doesnt kill cargo? OK
+-Groundwar/Navalwar and mixed war still correct detection? OK
+-AI extra base on waypoint still works? OK
+-AI protects MCV's going to waypoints? OK
+-AI MAD-tanks still deploy? OK
+-Chrono tanks group/ungroup jumping still correct? OK
+-Strategy mode: Normal? OK
+-Strategy mode: Infantry rush?
+-Strategy mode: Tank rush?
+-Strategy mode: Air rush?
+-Strategy mode: Naval rush?
+-Strategy mode: Defender?
+
+-AI new missions work? (Attack factories, Power, defense, etc.) (For future release)
+
+
+To do: (All)
+-Check all options in the .ini file (some are obsolete, some are missing)
+-Check the README.md 
+
+To do for Bast75:
+-Create new image for new Steam release: AI-Boost 3.0
+
+To do for Mini Franki:
+
+
+Idea's for the future:
+-Scan the map to find the number of Tiberium left to harvester (this so we can determin if extra refs, etc. are usefull or that we are in end-fase of the game)
+-Scan the map for water fields, if more than x, its automatically enables naval war.
+-Scan the map for rocks and other blockades to know the AI must boosted extra to compensate space problems.
+-Split house building prio's in seperate VOIDs for better strategies/buildlimits for rush tactics etc.
+-New mission: Gather at enemy base (out of range), wait a minute and then attack.
+-New mission: Attack Factories
+-New mission: Attack Power Plants
+-New mission: Attack defense (with Artillery units)
+-Find way to load the MCV on a transport, then we can send it to a waypoint to unload.
+-Find way to load other units on a transport, then we can send it to a waypoint (gather at enemy?) to unload and attack/capture enemy stuff.
+-AI should break/start an friendship on certain events.
+-Add a map in the mod thats shows all AI potentials? Naval, 2nd base, Chronosphere MCV, etc.
+
+
+Done (Need to be added to README.md if important enough):
+-Send a X percentage of units to guard MCV to help him to reach the waypoint destination successfully and to have some defense for the new base
+-AI uses startpositions/waypoints to start extra base(s)
+-AI MCV should not deploy premature when damage is not red -> no deploy, calls for help
+-Harvester memory option back in code
+-Iron curtain tweaks -> already ready. Iron Curtain recharge is high, so we only want to protect important things when its ready
+-MCV deploy should increase the limits. What limits exactly? Editable in .ini?
+-Airstrip/airpad code to check
+-Selling/power list tweak
+-Chronosphere code need rework
+-Center of base must be set to all bases to make sure AI builds on all of them. If not possible, recalculate on new base only
+-Prio for base defense set to half, if chronosphere, iron curtain, nuke ready, then defense limits to max? (This so those buildings will be produced faster)
+-Chronoshift MCV should use the Chronosphere with timer, etc.

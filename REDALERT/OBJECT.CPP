@@ -99,6 +99,8 @@
 
 #include "function.h"
 
+//#include "CFEDEBUG.H"
+
 /*
 **	Selected objects have a special marking box around them. This is the shapes that are
 **	used for this purpose.
@@ -1687,7 +1689,7 @@ RadioMessageType ObjectClass::Receive_Message(RadioClass *, RadioMessageType mes
  *   12/27/1994 JLB : Trigger event processing for attacked or destroyed.                      *
  *   01/01/1995 JLB : Reduces damage greatly depending on range.                               *
  *=============================================================================================*/
-ResultType ObjectClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced)
+ResultType ObjectClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced, TARGET indirectsource, ArmorPenType specialarmorpen)
 {
 	assert(this != 0);
 	assert(IsActive);
@@ -1730,8 +1732,12 @@ ResultType ObjectClass::Take_Damage(int & damage, int distance, WarheadType warh
 #else
 			if (What_Am_I() == RTTI_INFANTRY) {
 #endif
-				Clicked_As_Target(PlayerPtr->Class->House, 7); // 2019/09/20 JAS - Added record of who clicked on the object
-				Strength -= damage;
+				// Chthon CFE Note: this is wrong. PlayerPtr will always point to the server in LAN multiplayer, so only server will see flashes 
+                // Clicked_As_Target(PlayerPtr->Class->House, 7); // 2019/09/20 JAS - Added record of who clicked on the object
+				//Clicked_As_Target(Owner(), 7);
+                // on second thought, since the local player can see the flash for CPU players, this should be shown to everyone
+                Clicked_As_Target(HOUSE_COUNT, 7); //HOUSE_COUNT means show everyone
+                Strength -= damage;
 				if (Strength > maxstrength) {
 					Strength = maxstrength;
 				}
@@ -2421,8 +2427,8 @@ void ObjectTypeClass::One_Time(void)
  *   07/29/1996 JLB : Created.                                                                 *
  *=============================================================================================*/
 BuildingClass * ObjectTypeClass::Who_Can_Build_Me(bool intheory, bool legal, HousesType house) const
-{
-	BuildingClass * anybuilding = NULL;
+{  
+    BuildingClass * anybuilding = NULL;
 
 	if (!intheory && What_Am_I() == RTTI_AIRCRAFTTYPE && ((AircraftTypeClass*)this)->IsFixedWing) {
 		int num_builders = 0, num_fixed_wings = 0;
@@ -2430,9 +2436,14 @@ BuildingClass * ObjectTypeClass::Who_Can_Build_Me(bool intheory, bool legal, Hou
 			BuildingClass * building = Buildings.Ptr(index);
 			assert(building != NULL);
 
+            // Chthon CFE Note: Bugfix! We need to specifically count ONLY airstrips.
+            // Original code also counted helipads
+            // Which allowed you to create excess planes if you had 1+ helipads and 1+ planes in the air when the construction finished
+            // Petroglyph made it worse by making the blocked production spam retries every frame, guaranteeing you'll activate the bug as soon as your planes take off.
 			if (	!building->IsInLimbo &&
 					building->House->Class->House == house &&
-					building->Class->ToBuild == RTTI &&
+					//building->Class->ToBuild == RTTI &&
+					(*building == STRUCT_AIRSTRIP) &&
 					building->Mission != MISSION_DECONSTRUCTION && building->MissionQueue != MISSION_DECONSTRUCTION &&
 					((1L << building->ActLike) & Get_Ownable()) &&
 					(!legal || building->House->Can_Build(this, building->ActLike))) {

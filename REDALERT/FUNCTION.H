@@ -494,7 +494,7 @@ int harderr_handler(unsigned, unsigned, unsigned __far *);
 **	COMBAT.CPP
 */
 int Modify_Damage(int damage, WarheadType warhead, ArmorType armor, int distance);
-void Explosion_Damage(COORDINATE coord, int strength, TechnoClass * source, WarheadType warhead);
+void Explosion_Damage(COORDINATE coord, int strength, TechnoClass * source, WarheadType warhead, ArmorPenType specialarmorpen = ARMORPEN_NONE);
 AnimType Combat_Anim(int damage, WarheadType warhead, LandType land);
 void Wide_Area_Damage(COORDINATE coord, LEPTON radius, int damage, TechnoClass * source, WarheadType warhead);
 
@@ -552,6 +552,9 @@ void CC_Draw_Shape(const ObjectClass *object, const char *shape_file_name, void 
 
 // Added for pip draw intercept - SKY
 void CC_Draw_Pip(const ObjectClass *object, void const * shapefile, int shapenum, int x, int y, WindowNumberType window, ShapeFlags_Type flags, void const * fadingdata = 0, void const * ghostdata = 0, DirType rotation = DIR_N);
+
+// Added for line draw intercept (ex. Obelisk laser) - SKY
+void CC_Draw_Line(int x, int y, int x1, int y1, unsigned char color, int frame, WindowNumberType window);
 
 void Go_Editor(bool flag);
 //long MixFileHandler(VQAHandle * vqa, long action, void * buffer, long nbytes);
@@ -981,6 +984,10 @@ NeedType TeamMission_Needs(TeamMissionType tmtype);
 */
 void Detach_This_From_All(TARGET target, bool all=true);
 
+// Chthon CFE Note: minimal version for use with chronoshift
+// only reflects the fact that the unit is no longer where it was,
+void Minimal_Detach_This_From_All(TARGET target, bool all=true);
+
 /*
 **	TRIGGER.CPP
 */
@@ -1084,5 +1091,18 @@ void Enable_Uncompressed_Shapes (void);
 ** Achievement event. ST - 11/11/2019 11:39AM
 */
 void On_Achievement_Event(const HouseClass* player_ptr, const char *achievement_type, const char *achievement_reason);
+
+bool CFE_Patch_Is_Wall(const ObjectTypeClass& object);
+bool CFE_Patch_Can_Have_Rally_Point(const ObjectClass& object);
+bool CFE_Patch_Should_Extend_Walls(void);
+bool CFE_Patch_Is_Cell_Friendly_To_House(const HousesType house, const CELL cell, const bool isawall);
+bool CFE_Patch_Is_Cell_In_Radius_To_Friendly_House(const HousesType house, const CELL cell, const int radius, const bool isawall);
+bool CFE_Patch_Unit_Should_Rally(const TechnoClass& object);
+int CFE_Patch_FullRange_Random_Pick(int min, int max);
+void CFE_Patch_Sound_Effect_For_All_Humans(VocType voc, COORDINATE coord=NULL, int variation=1, HouseClass* skiphouse = NULL);
+void CFE_Patch_Sound_Effect_For_Seers(VocType voc, TechnoClass* thingy, int variation=1);
+void CFE_Patch_Sound_Effect_For_Seers(VocType voc, CELL cell, int variation=1);
+void  CFE_Patch_Speak_For_All_Humans(VoxType voice, COORDINATE coord=0, HouseClass* skiphouse=NULL);
+void Initialise_CFE_Patch_Config(void);
 
 #endif

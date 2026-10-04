@@ -2791,8 +2791,10 @@ BF_Ghost:
 
 	; get length of the 32 groups of instructions
 
+	; MASM requires an immediate OFFSET here: [OFFSET label] reads
+	; instruction bytes and corrupts the computed jump destination.
 	lea	ecx, [offset ghost_reference]
-	sub	ecx, [offset ghost_line]
+	sub	ecx, OFFSET ghost_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -2861,7 +2863,7 @@ BF_Ghost_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset ghost_t_reference ]
-	sub	ecx, [ offset ghost_t_line ]
+	sub	ecx, OFFSET ghost_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -2936,7 +2938,7 @@ BF_Fading:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset fading_reference ]
-	sub	ecx, [ offset fading_line ]
+	sub	ecx, OFFSET fading_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3004,7 +3006,7 @@ BF_Fading_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset fading_t_reference ]
-	sub	ecx, [ offset fading_t_line ]
+	sub	ecx, OFFSET fading_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3078,7 +3080,7 @@ BF_Ghost_Fading:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset ghost_f_reference ]
-	sub	ecx, [ offset ghost_f_line ]
+	sub	ecx, OFFSET ghost_f_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3164,7 +3166,7 @@ BF_Ghost_Fading_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset ghost_f_t_reference ]
-	sub	ecx, [ offset ghost_f_t_line ]
+	sub	ecx, OFFSET ghost_f_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3256,7 +3258,7 @@ BF_Predator:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_reference ]
-	sub	ecx, [offset predator_line ]
+	sub	ecx, OFFSET predator_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3339,7 +3341,7 @@ BF_Predator_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_t_reference ]
-	sub	ecx, [ offset predator_t_line ]
+	sub	ecx, OFFSET predator_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3421,7 +3423,7 @@ BF_Predator_Ghost:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_g_reference ]
-	sub	ecx, [ offset predator_g_line ]
+	sub	ecx, OFFSET predator_g_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3512,7 +3514,7 @@ BF_Predator_Ghost_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_g_t_reference ]
-	sub	ecx, [ offset predator_g_t_line ]
+	sub	ecx, OFFSET predator_g_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3609,7 +3611,7 @@ BF_Predator_Fading:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_f_reference ]
-	sub	ecx, [ offset predator_f_line ]
+	sub	ecx, OFFSET predator_f_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3699,7 +3701,7 @@ BF_Predator_Fading_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_f_t_reference ]
-	sub	ecx, [ offset predator_f_t_line ]
+	sub	ecx, OFFSET predator_f_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3795,7 +3797,7 @@ BF_Predator_Ghost_Fading:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_g_f_reference ]
-	sub	ecx, [ offset predator_g_f_line ]
+	sub	ecx, OFFSET predator_g_f_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32
@@ -3903,7 +3905,7 @@ BF_Predator_Ghost_Fading_Trans:
 	; get length of the 32 groups of instructions
 
 	lea	ecx , [ offset predator_g_f_t_reference ]
-	sub	ecx, [ offset predator_g_f_t_line ]
+	sub	ecx, OFFSET predator_g_f_t_line
 
 	shr	ebx , 5				; width / 32
 	shr	ecx , 5				; length of instructions / 32

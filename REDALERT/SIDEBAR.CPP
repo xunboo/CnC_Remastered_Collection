@@ -1408,7 +1408,8 @@ void SidebarClass::StripClass::Deactivate(void)
  *=============================================================================================*/
 bool SidebarClass::StripClass::Add(RTTIType type, int id, bool via_capture)
 {
-	if (BuildableCount <= MAX_BUILDABLES) {
+    // Chthon CFE Note: bugfix as per https://github.com/electronicarts/CnC_Remastered_Collection/issues/105
+	if (BuildableCount < MAX_BUILDABLES) {
 		for (int index = 0; index < BuildableCount; index++) {
 			if (Buildables[index].BuildableType == type && Buildables[index].BuildableID == id) {
 				return(false);
@@ -1942,7 +1943,8 @@ bool SidebarClass::StripClass::Recalc(void)
 			**	Removes this entry from the list.
 			*/
 			if (BuildableCount > 1 && index < BuildableCount-1) {
-				memcpy(&Buildables[index], &Buildables[index+1], sizeof(Buildables[0])*((BuildableCount-index)-1));
+				//memcpy(&Buildables[index], &Buildables[index+1], sizeof(Buildables[0])*((BuildableCount-index)-1));
+                memmove(&Buildables[index], &Buildables[index+1], sizeof(Buildables[0])*((BuildableCount-index)-1));
 			}
 			TopIndex = 0;
 			IsToRedraw = true;

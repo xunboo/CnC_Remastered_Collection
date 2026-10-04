@@ -485,6 +485,17 @@ bool FactoryClass::Abandon(void)
 	if (Object) {
 
 		if (Object) {
+			if (House) {
+				switch (Object->What_Am_I()) {
+					case RTTI_UNIT: House->UnitInProduction = false; break;
+					case RTTI_VESSEL: House->VesselInProduction = false; break;
+					case RTTI_INFANTRY: House->InfantryInProduction = false; break;
+					case RTTI_BUILDING: House->BuildingInProduction = false; break;
+					case RTTI_AIRCRAFT: House->AircraftInProduction = false; break;
+					default: break;
+				}
+			}
+
 			/*
 			**	Refund all money expended so far, back to the owner of the object under construction.
 			*/

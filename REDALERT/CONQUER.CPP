@@ -289,8 +289,11 @@ void Main_Game(int argc, char * argv[])
 #ifdef FIXIT_CSII	//	checked - ajw 9/28/98
 				TimeQuake = PendingTimeQuake;
 				PendingTimeQuake = false;
+                GlobalTimeQuake = PendingGlobalTimeQuake;
+				PendingGlobalTimeQuake = false;
 #else
 				TimeQuake = false;
+                GlobalTimeQuake = false;
 #endif
 				if (Main_Loop()) {
 					break;
@@ -2276,9 +2279,11 @@ Mono_Set_Cursor(0,0);
 	*/
 	Logic.AI();
 	TimeQuake = false;
+    GlobalTimeQuake = false;
 #ifdef FIXIT_CSII	//	checked - ajw 9/28/98
 	if (!PendingTimeQuake) {
 		TimeQuakeCenter = 0;
+        MADTimeQuakeCenterList.Clear();
 	}
 #endif
 
@@ -3428,6 +3433,8 @@ void const * Get_Radar_Icon(void const * shapefile, int shapenum, int frames, in
 
 extern void DLL_Draw_Intercept(int shape_number, int x, int y, int width, int height, int flags, const ObjectClass *object, DirType rotation, long scale, const char *shape_file_name, char override_owner);
 extern void DLL_Draw_Pip_Intercept(const ObjectClass* object, int pip);
+extern void DLL_Draw_Line_Intercept(int x, int y, int x1, int y1, unsigned char color, int frame);
+
 void CC_Draw_Shape(void const * shapefile, int shapenum, int x, int y, WindowNumberType window, ShapeFlags_Type flags, void const * fadingdata, void const * ghostdata, DirType rotation);
 
 void CC_Draw_Shape(const ObjectClass *object, void const * shapefile, int shapenum, int x, int y, WindowNumberType window, ShapeFlags_Type flags, void const * fadingdata, void const * ghostdata, DirType rotation, long virtualscale, int width, int height)
@@ -3463,6 +3470,17 @@ void CC_Draw_Pip(const ObjectClass *object, void const * shapefile, int shapenum
 	}
 
 	CC_Draw_Shape(shapefile, shapenum, x, y, window, flags, fadingdata, ghostdata, rotation);
+}
+
+
+void CC_Draw_Line(int x, int y, int x1, int y1, unsigned char color, int frame, WindowNumberType window)
+{
+	if (window == WINDOW_VIRTUAL) {
+		DLL_Draw_Line_Intercept(x, y, x1, y1, color, frame);
+		return;
+	}
+
+	LogicPage->Draw_Line(x, y, x1, y1, color);
 }
 
 
@@ -4127,7 +4145,9 @@ void Handle_Team(int team, int action)
 					** offsets, and they'll be formationed.
 					*/
 #if(1)
-					obj->XFormOffset = obj->YFormOffset = (int)0x80000000;
+					// Chthon CFE Note: use as constant as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/b9dd91283bd6e43f85c047a36a49dc2e007f01a1
+					//obj->XFormOffset = obj->YFormOffset = (int)0x80000000;
+					obj->XFormOffset = obj->YFormOffset = INVALID_FORMATION;
 #else
 #if(1)
 // Old always-north formation stuff
@@ -4152,7 +4172,9 @@ void Handle_Team(int team, int action)
 					if (obj->Is_Selected_By_Player()) obj->Group = team;
 					if (obj->Group == team  && obj->Is_Selected_By_Player()) {
 #if(1)
-						obj->XFormOffset = obj->YFormOffset = (int)0x80000000;
+						// Chthon CFE Note: use as constant as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/b9dd91283bd6e43f85c047a36a49dc2e007f01a1
+                        //obj->XFormOffset = obj->YFormOffset = (int)0x80000000;
+                        obj->XFormOffset = obj->YFormOffset = INVALID_FORMATION;
 #else
 #if(1)
 // Old always-north formation stuff
@@ -5576,13 +5598,17 @@ void Shake_The_Screen(int shakes, HousesType house)
  *=============================================================================================*/
 void List_Copy(short const * source, int len, short * dest)
 {
-	if (dest == NULL || dest == NULL) {
+	// Chthon CFE Note: bugfix as per https://github.com/electronicarts/CnC_Remastered_Collection/pull/81
+    // also bugfix as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/624e391b655d3fde73c253a2368a9cc9c518cbca
+    if (len < 1 || source == NULL || dest == NULL) {
 		return;
 	}
 
 	while (len > 0) {
 		*dest = *source;
-		if (*dest == REFRESH_EOL) break;
+        // bugfix as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/624e391b655d3fde73c253a2368a9cc9c518cbca
+		//if (*dest == REFRESH_EOL) break;
+        if (*dest == REFRESH_EOL) return;
 		dest++;
 		source++;
 		len--;

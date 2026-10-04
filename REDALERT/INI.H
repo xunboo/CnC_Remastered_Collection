@@ -37,6 +37,7 @@
 #define INI_H
 
 #include	<stdlib.h>
+#include	<utility>
 #include	"listnode.h"
 #include	"pipe.h"
 #include	"wwfile.h"
@@ -45,11 +46,17 @@
 #include	"crc.h"
 #include	"search.h"
 
+class Straw;
+
 /*
 **	This is an INI database handler class. It handles a database with a disk format identical
 **	to the INI files commonly used by Windows.
 */
 class INIClass {
+	protected:
+		struct INISection;
+		struct INIEntry;
+
 	public:
 		INIClass(void) {}
 		~INIClass(void);
@@ -89,7 +96,7 @@ class INIClass {
 		**	Get the various data types from the section and entry specified.
 		*/
 		int Get_String(char const * section, char const * entry, char const * defvalue, char * buffer, int size) const;
-		int Get_Int(char const * section, char const * entry, int defvalue=0) const;
+		int Get_Int(char const * section, char const * entry, int defvalue=0, int offset=0) const;
 		int Get_Hex(char const * section, char const * entry, int defvalue=0) const;
 		bool Get_Bool(char const * section, char const * entry, bool defvalue=false) const;
 		int Get_TextBlock(char const * section, char * buffer, int len) const;
@@ -108,6 +115,55 @@ class INIClass {
 		bool Put_TextBlock(char const * section, char const * text);
 		bool Put_UUBlock(char const * section, void const * block, int len);
 		bool Put_PKey(PKey const & key);
+
+		/* cfehunter 14/06/2020
+		** I needed to be able to iterate sections to reconcile ini files
+		** so just some simple iterator to facilitate that
+		*/
+		struct INISectionIterator
+			: public NodeIterator<const INISection>
+		{
+			using Base = typename NodeIterator<const INISection>;
+			using Base::iterator_category;
+
+			INISectionIterator() = default;
+			INISectionIterator(Base node)
+				: Base(node)
+			{}
+
+			//Westwood have global overrides for ++,--,+= and -=.
+			//This causes name resolution to fail if the operators aren't explicitly brought into derived class scope
+			using Base::operator++;
+			using Base::operator--;
+
+			const char* operator->() { return **this; }
+			const char* operator*();
+		};
+
+		struct INIEntryIterator
+			: public NodeIterator<const INIEntry>
+		{
+			using Base = typename NodeIterator<const INIEntry>;
+			using Base::iterator_category;
+
+			INIEntryIterator() = default;
+			INIEntryIterator(Base node)
+				: Base(node)
+			{ }
+
+			//Westwood have global overrides for ++,--,+= and -=.
+			//This causes name resolution to fail if the operators aren't explicitly brought into derived class scope
+			using Base::operator++;
+			using Base::operator--;
+
+			std::pair<const char*, const char*> operator->() { return **this; }
+			std::pair<const char*, const char*> operator*();
+		};
+
+		INISectionIterator begin() const { return SectionList.begin(); }
+		INISectionIterator end() const { return SectionList.end(); }
+		INIEntryIterator section_begin(const char* section) const;
+		INIEntryIterator section_end(const char* section) const;
 
 	protected:
 		enum {MAX_LINE_LENGTH=128};
@@ -134,6 +190,9 @@ class INIClass {
 			~INISection(void) {free(Section);Section = 0;EntryList.Delete();}
 			INIEntry * Find_Entry(char const * entry) const;
 			int Index_ID(void) const {return(CRCEngine()(Section, strlen(Section)));};
+
+			INIEntryIterator begin() const { return INIEntryIterator(EntryList.First()); }
+			INIEntryIterator end() const { return INIEntryIterator(); }
 
 			char * Section;
 			List<INIEntry> EntryList;

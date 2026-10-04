@@ -172,7 +172,6 @@ static void Load_Prolog_Page(void)
 	Show_Mouse();
 }
 
-
 /***********************************************************************************************
  * Init_Game -- Main game initialization routine.                                              *
  *                                                                                             *
@@ -214,6 +213,12 @@ bool Init_Game(int , char * [])
 	**	handler to function.
 	*/
 	Bootstrap();
+
+	/*
+	** Init CFE Patch early to have all variables set,
+	** in case it's used while the game inits (offsets etc).
+	*/
+	Initialise_CFE_Patch_Config();
 
 	////////////////////////////////////////
 	// The editor needs to not start the mouse up. - 7/22/2019 JAS 
@@ -319,6 +324,10 @@ bool Init_Game(int , char * [])
 		}
 	}
 #endif
+	//Changed by Bast75
+	if (MoreQoLINI.Load(CCFileClass("AIBOOST.INI"), false)) {
+		Rule.Process(MoreQoLINI);
+	}
 
 	Session.MaxPlayers = Rule.MaxPlayers;
 
@@ -427,6 +436,23 @@ bool Init_Game(int , char * [])
 	** dialogs are invoked.  (GameSpeed must be synchronized between systems.)
 	*/
 	Options.Load_Settings();
+
+	/*
+	** 06/20/2020 Root-Core - We have to patch building distance here, as otherwise the value would stack.
+	** This is caused by multiple INI files that alter the same buildings. (3+Offset, 3+Offset+Offset, etc..)
+	**
+	** And we can not patch BuildingGapOffset here, as it would get overridden later.
+	*/
+	for (int bindex = 0; bindex < BuildingTypes.Count(); ++bindex) {
+		BuildingTypeClass* building = BuildingTypes.Ptr(bindex);
+
+		if (Rule.BuildingGapOffset) {
+			building->Adjacent += Rule.BuildingGapOffset;
+			if (building->Adjacent < 0) {
+				building->Adjacent = 0;
+			}
+		}
+	}
 
 	/*
 	** Initialise the color lookup tables for the chronal vortex
@@ -3206,6 +3232,8 @@ static void Init_Secondary_Mixfiles(void)
 	ConquerMix = new MFCD("CONQUER.MIX", &FastKey);			// Cached.
 //	new MFCD("TRANSIT.MIX", &FastKey);
 
+    RAModMix = new MFCD("MOD_RA.MIX", &FastKey);  // Chthon CFE Note: Read our mod_ra.mix file so we can add assets for classic mode
+    
 	if (GeneralMix == NULL) GeneralMix = new MFCD("GENERAL.MIX", &FastKey);			// Never cached.
 
 	if (CCFileClass("MOVIES1.MIX").Is_Available()) {
@@ -3540,6 +3568,7 @@ static void Init_Bulk_Data(void)
 	**	Cache the main game data. This operation can take a very long time.
 	*/
 	MFCD::Cache("CONQUER.MIX");
+    MFCD::Cache("MOD_RA.MIX"); // Chthon CFE Note: Cache our mod assets too
 	if (SampleType != 0 && !Debug_Quiet) {
 		MFCD::Cache("SOUNDS.MIX");
 		MFCD::Cache("RUSSIAN.MIX");

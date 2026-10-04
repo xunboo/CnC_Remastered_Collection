@@ -93,6 +93,11 @@
 
 #include	"function.h"
 
+//#include "CFEDEBUG.H"
+
+// Chthon CFE Note -- We need this for checking the shift key for attack-move
+extern bool DLL_Export_Get_Input_Key_State(KeyNumType key);
+
 
 /***********************************************************************************************
  * _Counts_As_Civ_Evac -- Is the specified object a candidate for civilian evac logic?         *
@@ -255,6 +260,9 @@ AircraftClass::AircraftClass(AircraftType classid, HousesType house) :
 //		House->AircraftTotals->Increment_Unit_Total((int)classid);
 //	}
 
+    // Chthon CFE Note: Initialize mod stuff here
+    TargetRecheckCounter = 0;
+	
 }
 
 
@@ -666,16 +674,60 @@ int AircraftClass::Mission_Hunt(void)
 			**	Acquiring target stage.
 			*/
 			case LOOK_FOR_TARGET:
-				if (Target_Legal(TarCom)) {
+				//if (Target_Legal(TarCom) && (Ammo || !ActiveCFEPatchConfig.EnableSmarterAircraft || IsALoaner)) {
+				if (Target_Legal(TarCom) && (Ammo || !Rule.SmarterAircraftsEnabled || IsALoaner)) {
 					Status = TAKE_OFF;
 					return(1);
+                }
+				//else if (!Ammo && ActiveCFEPatchConfig.EnableSmarterAircraft) {
+                else if (!Ammo && Rule.SmarterAircraftsEnabled){
+                    AttacksRemaining = 0;
+					if (Team.Is_Valid()) Team->Remove(this);
+					Enter_Idle_Mode();
+                    return(1);
 				} else {
 					if (!Team.Is_Valid()) {
-						if (Session.Type != GAME_NORMAL) {
+						//if (Session.Type != GAME_NORMAL) {
+						//By Bast75, set different attack modes, like to factories, power, etc.
+						int AiAirAttackChoice = Random_Pick(0, 15);
+						switch (AiAirAttackChoice) {
+						case 0:
+						case 12:
+						case 13:
+							Assign_Target(Greatest_Threat(THREAT_BASE_DEFENSE));
+							break;
+						case 1:
+						case 10:
+						case 11:
+							Assign_Target(Greatest_Threat(THREAT_FACTORIES));
+							break;
+						case 2:
+						case 8:
+						case 9:
+							Assign_Target(Greatest_Threat(THREAT_POWER));
+							break;
+						case 3:
+							Assign_Target(Greatest_Threat(THREAT_GROUND));
+							break;
+						case 4:
+							Assign_Target(Greatest_Threat(THREAT_BOATS));
+							break;
+						case 5:
+							Assign_Target(Greatest_Threat(THREAT_NORMAL));
+							break;
+						case 6:
 							Assign_Target(Greatest_Threat(THREAT_TIBERIUM));
+							break;
+						case 7:
+						case 14:
+						case 15:
+							Assign_Target(Greatest_Threat(THREAT_BUILDINGS));
+							break;
+						default:
+							break;
 						}
 						if (!Target_Legal(TarCom)) {
-							Assign_Target(Greatest_Threat(THREAT_NORMAL));
+							Assign_Target(Greatest_Threat(THREAT_POWER));
 						}
 
 						/*
@@ -778,7 +830,15 @@ int AircraftClass::Mission_Hunt(void)
 							}
 						}
 						Fire_At(targ, 0);
-						if (Class->Is_Two_Shooter()) {
+                        
+                        // Chthon CFE Note: rank 3 MIGS/Yals fire two missiles per ammo pip (fudge this by restoring 1 ammo between shots) (check for two-shooter in case it's removed via rules.ini edit)
+                        if ((VeterancyRank == 3) && ((*this == AIRCRAFT_MIG) || (*this == AIRCRAFT_YAK)) && Class->Is_Two_Shooter()){
+                            Ammo++;
+                        }
+                        
+                        // Chthon CFE Note: bugfix missing ammo check -- causes fixed-wing planes with two-shooter & odd number of max ammo to make extra free shot
+						//if (Class->Is_Two_Shooter()) {
+						if (Ammo && Class->Is_Two_Shooter()) {
 							Fire_At(targ, 0);
 						}
 						return(Arm);
@@ -844,11 +904,51 @@ int AircraftClass::Mission_Hunt(void)
 			Enter_Idle_Mode();
 		} else {
 			if (!Target_Legal(TarCom)) {
-				if (Session.Type != GAME_NORMAL) {
-					Assign_Target(Greatest_Threat(THREAT_TIBERIUM));
+				//if (Session.Type != GAME_NORMAL) {
+				//	Assign_Target(Greatest_Threat(THREAT_TIBERIUM));
+				//}
+				//By Bast75, set different attack modes, like to factories, power, etc.
+				if (Session.Type == GAME_SKIRMISH || 1==1) { //Do always
+					int AiAirAttackChoice = Random_Pick(0, 15);
+					switch (AiAirAttackChoice) {
+					case 0:
+					case 12:
+					case 13:
+						Assign_Target(Greatest_Threat(THREAT_BASE_DEFENSE));
+						break;
+					case 1:
+					case 10:
+					case 11:
+						Assign_Target(Greatest_Threat(THREAT_FACTORIES));
+						break;
+					case 2:
+					case 8:
+					case 9:
+						Assign_Target(Greatest_Threat(THREAT_POWER));
+						break;
+					case 3:
+						Assign_Target(Greatest_Threat(THREAT_GROUND));
+						break;
+					case 4:
+						Assign_Target(Greatest_Threat(THREAT_BOATS));
+						break;
+					case 5:
+						Assign_Target(Greatest_Threat(THREAT_NORMAL));
+						break;
+					case 6:
+						Assign_Target(Greatest_Threat(THREAT_TIBERIUM));
+						break;
+					case 7:
+					case 14:
+					case 15:
+						Assign_Target(Greatest_Threat(THREAT_BUILDINGS));
+						break;
+					default:
+						break;
+					}
 				}
 				if (!Target_Legal(TarCom)) {
-					Assign_Target(Greatest_Threat(THREAT_NORMAL));
+					Assign_Target(Greatest_Threat(THREAT_POWER));
 				}
 				if (!Target_Legal(TarCom)) {
 					Enter_Idle_Mode();
@@ -860,7 +960,8 @@ int AircraftClass::Mission_Hunt(void)
 			return(1);
 		}
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_HUNT : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -884,6 +985,62 @@ void AircraftClass::AI(void)
 	assert(Aircraft.ID(this) == ID);
 	assert(IsActive);
 
+    
+    // Chthon CFE Note: rank 3 veteran helicopters repair for free while docked (at half the rate as repair bay)
+    // RA uses Height instead of Altitude
+    if (    (VeterancyRank == 3) &&
+            ((*this == AIRCRAFT_LONGBOW) || (*this == AIRCRAFT_HIND) || (*this == AIRCRAFT_MIG) || (*this == AIRCRAFT_YAK)) && 
+            (Height == 0) &&
+            !IsLanding &&
+            !IsTakingOff &&
+            (Health_Ratio() < Rule.ConditionGreen) // in RA Health_Ratio is fixed, not unsigned, so it can't be compared against hex literals
+       ){
+        TechnoClass * tech = Contact_With_Whom();
+        if (   tech &&
+                (tech->What_Am_I() == RTTI_BUILDING) &&
+                (   
+                    (
+                        (*((BuildingClass*)tech) == STRUCT_HELIPAD) && 
+                        ((*this == AIRCRAFT_LONGBOW) || (*this == AIRCRAFT_HIND))
+                    ) ||
+                    (
+                        (*((BuildingClass*)tech) == STRUCT_AIRSTRIP) && 
+                        ((*this == AIRCRAFT_MIG) || (*this == AIRCRAFT_YAK))
+                    )
+                ) &&
+                (::Distance(Center_Coord(), tech->Docking_Coord()) < 0x0040)
+           ){
+            // RA uses different low power logic
+            fixed pfrac = Saturate(House->Power_Fraction(), 1);
+            if (pfrac < fixed::_1_2) pfrac = fixed::_1_2;
+			int repaircycle = Inverse(pfrac) * 28; // repair pad has a 14-tick animation, so 28 ticks is half as fast
+            if (Frame % repaircycle == 0){
+                Strength += Class->Repair_Step();
+                if (Strength > Class_Of().MaxStrength){
+                    Strength = Class_Of().MaxStrength;
+                }
+            }
+        }
+    }
+    
+    // Chthon CFE Note: If we have a memorized nav list and our ammo is reloaded, then reload the nav list and take off
+    if (   HasMemorizedNavQueue && 
+            (Techno_Type_Class()->PrimaryWeapon != NULL) && 
+            !Class->PrimaryWeapon->IsCamera &&
+            (Class->MaxAmmo > 0) &&
+            (Ammo == Class->MaxAmmo) &&
+            (Height == 0) &&
+            !IsLanding &&
+            !IsTakingOff &&
+            (
+                (VeterancyRank < 3) ||
+                (Strength >= Class_Of().MaxStrength)
+            )
+    ){
+        Recall_Navigation_List();
+    }
+    
+    
 	/*
 	**	A Mission change can always occur if the aircraft is landed or flying.
 	*/
@@ -1230,7 +1387,8 @@ int AircraftClass::Mission_Unload(void)
 				break;
 		}
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_UNLOAD : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -1381,7 +1539,8 @@ int AircraftClass::Mission_Retreat(void)
 		default:
 			break;
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_RETREAT : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -1557,8 +1716,10 @@ BulletClass * AircraftClass::Fire_At(TARGET target, int which)
 		**	Aircraft reveal when firing
 		*/
 		HouseClass *player = HouseClass::As_Pointer(Owner());
-		if (player != nullptr && player->IsHuman) {
+		if (player != nullptr && (player->IsHuman || Rule.EnableNewSkirmishAI)) {
 			Map.Sight_From(Coord_Cell(Center_Coord()), 1, player, false);
+            // Chthon CFE Note: It should also set its revealed flags itself to owner if it was under shroud
+            Revealed(player);
 		}
 
 		/*
@@ -1596,7 +1757,7 @@ BulletClass * AircraftClass::Fire_At(TARGET target, int which)
  * HISTORY:                                                                                    *
  *   05/26/1995 JLB : Created.                                                                 *
  *=============================================================================================*/
-ResultType AircraftClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced)
+ResultType AircraftClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced, TARGET indirectsource, ArmorPenType specialarmorpen)
 {
 	assert(Aircraft.ID(this) == ID);
 	assert(IsActive);
@@ -1613,7 +1774,7 @@ ResultType AircraftClass::Take_Damage(int & damage, int distance, WarheadType wa
 	/*
 	**	Apply the damage to the aircraft.
 	*/
-	res = FootClass::Take_Damage(damage, distance, warhead, source, forced);
+	res = FootClass::Take_Damage(damage, distance, warhead, source, forced, indirectsource, specialarmorpen);
 
 	/*
 	**	Special action is performed if the aircraft is killed -- the cargo is destroyed
@@ -1688,6 +1849,16 @@ int AircraftClass::Mission_Move(void)
 
 			case TAKE_OFF:
 
+                // Attack Move rework by ChthonVII -- If "smarter aircraft" mode is also enabled, don't attack move if you don't have any ammo to start with
+				//if (AttackMove && ActiveCFEPatchConfig.EnableSmarterAircraft && !IsALoaner && !Ammo){
+                if (AttackMove && Rule.SmarterAircraftsEnabled && !IsALoaner && !Ammo){
+                    //Memorize_Navigation_List();
+                    ResetAttackMove();
+                    Clear_Navigation_List();
+                    Enter_Idle_Mode();
+                    return(1);
+                }
+                
 				/*
 				**	If the aircraft is high enough to begin its mission, then do so.
 				*/
@@ -1711,6 +1882,24 @@ int AircraftClass::Mission_Move(void)
 				distance = Distance(NavCom);
 
 				if (distance < 0x00C0) {
+                    // Make q-moves work
+                    if (Target_Legal(NavQueue[0])){
+                        if (AttackMove && !Ammo){
+                            //Memorize_Navigation_List();
+                            Clear_Navigation_List();
+                        }
+                        else {
+                            Assign_Destination(TARGET_NONE);
+                            Assign_Target(TARGET_NONE);
+                            Enter_Idle_Mode();
+                            return(1);
+                        }
+                    }
+                    
+                    // Attack Move rework by ChthonVII -- If we're reached the destination, exit attack move and go home
+                    if (AttackMove){
+                        ResetAttackMove();
+                    }
 					MissionType mission = MISSION_GUARD;
 
 					if (!IsALoaner) {
@@ -1795,7 +1984,15 @@ int AircraftClass::Mission_Move(void)
 		**	Double check and change LZ if necessary.
 		*/
 		case VALIDATE_LZ:
-			if (!Target_Legal(NavCom)) {
+			// Attack Move rework by ChthonVII -- If "smarter aircraft" mode is also enabled, don't attack move if you don't have any ammo to start with
+			//if (AttackMove && ActiveCFEPatchConfig.EnableSmarterAircraft && !IsALoaner && !Ammo){
+            if (AttackMove && Rule.SmarterAircraftsEnabled && !IsALoaner && !Ammo){
+                //Memorize_Navigation_List();
+                ResetAttackMove();
+                Clear_Navigation_List();
+                Enter_Idle_Mode();
+            }
+			else if (!Target_Legal(NavCom)) {
 				Enter_Idle_Mode();
 			} else {
 				if (!Is_LZ_Clear(NavCom) || !Cell_Seems_Ok(As_Cell(NavCom))) {
@@ -1840,6 +2037,28 @@ int AircraftClass::Mission_Move(void)
 				int distance = Process_Fly_To(true, NavCom);
 
 				if (distance < 0x0080) {
+                    
+                    // Make q-moves work
+                    if (Target_Legal(NavQueue[0])){
+                        if (AttackMove && !Ammo){
+                            //Memorize_Navigation_List();
+                            Clear_Navigation_List();
+                        } else {
+                            Assign_Destination(TARGET_NONE);
+                            Assign_Target(TARGET_NONE);
+                            Enter_Idle_Mode();
+                            return(1);
+                        }
+                    }
+                    
+                    // Attack Move rework by ChthonVII -- helicopters should go home at the end of an attack-move rather than landing
+                    if (AttackMove){
+                        Assign_Target(TARGET_NONE);
+                        Assign_Destination(TARGET_NONE);
+                        ResetAttackMove();
+                        Enter_Idle_Mode();
+                        return(1);
+                    }
 					if (Target_Legal(TarCom)) {
 						SecondaryFacing.Set_Desired(Direction(TarCom));
 					} else {
@@ -1887,8 +2106,8 @@ int AircraftClass::Mission_Move(void)
 		default:
 			break;
 	}
-
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+    const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_MOVE : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -1912,6 +2131,28 @@ void AircraftClass::Enter_Idle_Mode(bool )
 {
 	assert(Aircraft.ID(this) == ID);
 	assert(IsActive);
+    
+    // Chthon CFE Note: Since we're allowing aircraft to have q-moves issued to them, we'd better handle them
+    bool isoldnavcomgood = Target_Legal(NavCom);
+    Handle_Navigation_List();
+    if (Target_Legal(NavCom) && !isoldnavcomgood){
+        Assign_Mission(MISSION_MOVE);
+        Commence();
+        return;
+    }
+    
+    // Attack Move rework by ChthonVII -- If we would go idle, but we still have ammo, continue on towards destination instead
+    if (AttackMove){
+       if (Ammo){
+            AttackMoveEnterMoveMode();
+            return;
+        }
+        else {
+            Memorize_Navigation_List();
+            ResetAttackMove();
+            Clear_Navigation_List();
+        }
+    }
 
 	MissionType mission = (Class->IsFixedWing && IsALoaner && Class->PrimaryWeapon != NULL) ? MISSION_HUNT : MISSION_GUARD;
 	if (Class->IsFixedWing) {
@@ -2146,6 +2387,41 @@ int AircraftClass::Process_Fly_To(bool slowdown, TARGET dest)
 		}
 		distance = 0;
 	}
+	
+	// Chthon CFE Note: Since aircraft don't call Per_Cell_Process in flight, we need to set their visibility flags here
+	// Unlike everything else, aircraft can become "undiscovered" by their owner because they fly under the shroud
+	if (Frame % TICKS_PER_SECOND == 0){
+        CELL cell = Coord_Cell(Center_Coord());
+        if (Session.Type == GAME_NORMAL){
+            if (!Is_Discovered_By_Player(PlayerPtr) && Map[cell].Is_Visible(PlayerPtr)) {
+                Revealed(PlayerPtr);	
+            }
+            // we also need the reverse functionality to hide the unit if it goes back under the shroud
+            // (It appears that things that check for discovery really mean "is it shrouded from me" not "do I know it exists," so this may fix some issues with units not "discovering" the second time you see them.)
+            else if (Is_Discovered_By_Player(PlayerPtr) && !Map[cell].Is_Visible(PlayerPtr)){
+                Set_Undiscovered_By_Player(PlayerPtr);
+            }
+        }
+        else {
+            for (int i=0 ; i<Session.Players.Count() ; i++) {
+                HouseClass* someplayer = HouseClass::As_Pointer(Session.Players[i]->Player.ID);
+                if (someplayer && (someplayer->IsHuman || Rule.EnableNewSkirmishAI)){
+                    if (!Is_Discovered_By_Player(someplayer) && Map[cell].Is_Visible(someplayer)) {
+                        Revealed(someplayer);
+                    }
+                    // we also need the reverse functionality to hide the unit if it goes back under the shroud
+                    // (It appears that things that check for discovery really mean "is it shrouded from me" not "do I know it exists," so this may fix some issues with units not "discovering" the second time you see them.)
+                    else if (  Is_Discovered_By_Player(someplayer) &&
+                                   !Map[cell].Is_Visible(someplayer)
+                    ){
+                        //IsDiscoveredByPlayerMask &= ~(1 <<  (int)(someplayer->Class->House));
+                        Set_Undiscovered_By_Player(someplayer);
+                    }
+                }
+            }
+        }
+    }
+	
 	return(distance);
 }
 
@@ -2283,6 +2559,25 @@ void AircraftClass::Player_Assign_Mission(MissionType mission, TARGET target, TA
 			Response_Move();
 		}
 	}
+	
+	//if (   ActiveCFEPatchConfig.EnableAirQMove &&
+	if (Rule.AirQMoveAllowed &&
+            PlayerPtr &&
+            House && 
+            (PlayerPtr == House) &&
+            PlayerPtr->IsQueuedMovementToggle
+    ) {
+        if (mission == MISSION_MOVE) {
+            mission = MISSION_QMOVE;
+        }
+        else if (mission == MISSION_ATTACKMOVE){
+            // probably need to block certain units with special attack move logic from this as it may lead to odd behavior
+            mission = MISSION_QATTACKMOVE;
+        }
+    }
+	
+	//Clear_Memorized_Navigation_List(); // move this to event.cpp so it follows the queue
+	
 	Queue_Mission(TargetClass(this), mission, target, destination);
 }
 
@@ -2329,7 +2624,14 @@ ActionType AircraftClass::What_Action(ObjectClass const * target) const
 #endif
 
 	if (Class->IsFixedWing && action == ACTION_MOVE) {
-		action = ACTION_NOMOVE;
+        // Attack Move rework by ChthonVII -- we need this here so fixed wing planes can attack-move
+		//if (ActiveCFEPatchConfig.EnableAttackMove && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+        if (Rule.AttackMoveCommandAllowed && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+            action = ACTION_ATTACKMOVE;
+        }
+        else{
+            action = ACTION_NOMOVE;
+        }
 	}
 
 	if (action == ACTION_NONE) {
@@ -2375,7 +2677,8 @@ ActionType AircraftClass::What_Action(CELL cell) const
 	ActionType action = FootClass::What_Action(cell);
 
 	//using function for IsVisible so we have different results for different players - JAS 2019/09/30
-	if ((action == ACTION_MOVE || action == ACTION_ATTACK) && !Map[cell].Is_Visible(PlayerPtr)) {
+	// Attack Move rework by ChthonVII -- If you can't move aircraft into gap-covered cells, attack-move shouldn't work either
+    if ((action == ACTION_MOVE || action == ACTION_ATTACK || action == ACTION_ATTACKMOVE) && !Map[cell].Is_Visible(PlayerPtr)) {
 		action = ACTION_NOMOVE;
 	}
 
@@ -2384,7 +2687,14 @@ ActionType AircraftClass::What_Action(CELL cell) const
 	}
 
 	if (Class->IsFixedWing && action == ACTION_MOVE) {
-		action = ACTION_NOMOVE;
+        // Attack Move rework by ChthonVII -- we need this here so fixed wing planes can attack-move
+		//if (ActiveCFEPatchConfig.EnableAttackMove && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)) {
+        if (Rule.AttackMoveCommandAllowed && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+            action = ACTION_ATTACKMOVE;
+        }
+        else {
+            action = ACTION_NOMOVE;
+        }
 	}
 
 	return(action);
@@ -2462,7 +2772,8 @@ int AircraftClass::Mission_Attack(void)
 		**	Double check target and validate the attack zone.
 		*/
 		case VALIDATE_AZ:
-			if (!Target_Legal(TarCom)) {
+			//if (!Target_Legal(TarCom) ||  (ActiveCFEPatchConfig.EnableSmarterAircraft && !IsALoaner && !Ammo)) {
+			if (!Target_Legal(TarCom) ||  (Rule.SmarterAircraftsEnabled && !IsALoaner && !Ammo)) {
 				Status = RETURN_TO_BASE;
 			} else {
 				Status = PICK_ATTACK_LOCATION;
@@ -2479,6 +2790,8 @@ int AircraftClass::Mission_Attack(void)
 				Assign_Destination(Good_Fire_Location(TarCom));
 				if (Target_Legal(NavCom)) {
 					Status = TAKE_OFF;
+                    // Chthon CFE Note: smarter aircraft
+                    TargetRecheckCounter = 0;
 				} else {
 					Status = RETURN_TO_BASE;
 				}
@@ -2531,6 +2844,18 @@ int AircraftClass::Mission_Attack(void)
 					return(1);
 				}
 
+				// Chthon CFE Note: Smarter aircraft.
+				// If we've been flying towards the target for 120 ticks, let's make sure it hasn't moved
+				//if (ActiveCFEPatchConfig.EnableSmarterAircraft) {
+				if (Rule.SmarterAircraftsEnabled){
+                    TargetRecheckCounter++;
+                    if (TargetRecheckCounter >= 120){
+                        TargetRecheckCounter = 0;
+                        Status = PICK_ATTACK_LOCATION;
+                        return(1);
+                    }
+                }
+				
 				int distance = Process_Fly_To(true, NavCom);
 
 				if (distance < 0x0200) {
@@ -2638,6 +2963,7 @@ int AircraftClass::Mission_Attack(void)
 			**	point in attacking it this mission. The player will
 			**	reassign a target for the next mission.
 			*/
+            
 			if (!Ammo && (IsALoaner || House->IsHuman)) {
 				Assign_Target(TARGET_NONE);
 			}
@@ -2649,7 +2975,8 @@ int AircraftClass::Mission_Attack(void)
 			break;
 	}
 
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_ATTACK : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -2696,6 +3023,15 @@ TARGET AircraftClass::New_LZ(TARGET oldlz) const
 					TARGET newtarget = ::As_Target(newcell);
 
 					if (newcell != lastcell && Is_LZ_Clear(newtarget) && Cell_Seems_Ok(newcell)) {
+                        
+                        // Chthon CFE Note: stuff for attack-move & Q-move (doing this here is only OK because this function is ALWAYS called in conjuction with Assign_Destination() on its output) 
+                        JustModifiedNavCom = true; // tell AssignDestination() not to update UnmodifiedNavCom
+                        UnmodifiedNavCom = oldlz;
+                        // modify RememberedNavCom too, otherwise the mismatch may cause trouble with proximity checks
+                        if ((RememberedNavCom != TARGET_NONE) && ( RememberedNavCom == oldlz)){
+                            RememberedNavCom = newtarget;
+                        }
+                        
 						return(newtarget);
 					}
 					lastcell = newcell;
@@ -3694,7 +4030,7 @@ void AircraftClass::Scatter(COORDINATE , bool, bool )
 	**	Certain missions prevent scattering regardless of whether it would be
 	**	a good idea or not.
 	*/
-	if (!MissionControl[Mission].IsScatter) return;
+	if ((Mission != MISSION_NONE) && !MissionControl[Mission].IsScatter) return;
 
 	/*
 	**	Fixed wing aircraft never scatter.
@@ -3741,7 +4077,8 @@ int AircraftClass::Mission_Guard(void)
 			if (Target_Legal(NavCom)) {
 				Assign_Mission(MISSION_MOVE);
 			}
-			return(MissionControl[Mission].Normal_Delay());
+			const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_GUARD : Mission;
+			return(MissionControl[exitmission].Normal_Delay());
 		}
 
 		if (Class->PrimaryWeapon == NULL) {
@@ -3752,7 +4089,10 @@ int AircraftClass::Mission_Guard(void)
 		}
 		return(1);
 	}
-	if (House->IsHuman) return(MissionControl[Mission].Normal_Delay());
+	if (House->IsHuman){
+        const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_GUARD : Mission;
+        return(MissionControl[exitmission].Normal_Delay());
+    }
 
 	/*
 	**	If the aircraft is very badly damaged, then it will search for a
@@ -4449,3 +4789,42 @@ unsigned AircraftClass::Spied_By() const
 
 	return spiedby;
 }
+
+
+// Chthon CFE Note: logic for exiting repair bay
+bool AircraftClass::DoSmarterRunAway(){
+
+    // go to a helipad/airfield if one is open
+    BuildingClass * building = NULL;
+    building = Find_Docking_Bay(Class->Building, false);
+    if (Transmit_Message(RADIO_HELLO, building) != RADIO_ROGER) {
+        building = NULL;
+    }
+    if (building != NULL) {
+        Assign_Destination(building->As_Target());
+        Assign_Target(TARGET_NONE);
+		Assign_Mission(MISSION_ENTER);
+        //Commence();
+        return true;
+    }
+    
+    // if we're a helicopter, then we can at least land next to a helipad if they're all full
+    if (!Class->IsFixedWing){
+        TARGET goodenough = Good_LZ();
+        if (Target_Legal(goodenough) && (goodenough != ::As_Target(Coord_Cell(Coord)))){
+            Assign_Destination(goodenough);
+            Assign_Target(TARGET_NONE);
+            Assign_Mission(MISSION_MOVE);
+        }
+        // if Good_LZ() gave us back our current location, or failed altogether, just scatter
+        else{
+            Scatter(0, true);
+        }
+        return true;
+    }
+    
+    // if we're fixed wing and don't have an open airfield, we need to stay put, since we'll crash when we have nowhere to land
+    return false;
+    
+}
+

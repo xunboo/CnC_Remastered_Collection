@@ -88,6 +88,11 @@
 */
 #include "SidebarGlyphx.h"
 
+// Chthon CFE Note -- We need this for checking the shift key for attack-move
+extern bool DLL_Export_Get_Input_Key_State(KeyNumType key);
+
+// we need this playing sounds for one speciifc player
+extern void On_Sound_Effect(const HouseClass* player_ptr, int sound_effect_index, const char* extension, int variation, COORDINATE coord);
 
 int const InfantryClass::HumanShape[32] = {0,0,7,7,7,7,6,6,6,6,5,5,5,5,5,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,1,0};
 
@@ -320,7 +325,7 @@ void InfantryClass::operator delete(void * ptr)
  *   11/22/1994 JLB : Shares base damage handler for techno objects.                           *
  *   03/31/1995 JLB : Revenge factor.                                                          *
  *=============================================================================================*/
-ResultType InfantryClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced)
+ResultType InfantryClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced, TARGET indirectsource, ArmorPenType specialarmorpen)
 {
 	assert(Infantry.ID(this) == ID);
 	assert(IsActive);
@@ -347,7 +352,7 @@ ResultType InfantryClass::Take_Damage(int & damage, int distance, WarheadType wa
 			damage = 0;
 		}
 	}
-	res = FootClass::Take_Damage(damage, distance, warhead, source, forced);
+	res = FootClass::Take_Damage(damage, distance, warhead, source, forced, indirectsource, specialarmorpen);
 
 	/*
 	** hack for dog: if you're hit by a dog, and you're the target, your
@@ -654,9 +659,11 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 							iscapturable = tech->Can_Capture();
 						}
 #ifdef FIXIT_ENGINEER	//	checked - ajw 9/28/98
-						if (tech->Health_Ratio() <= EngineerCaptureLevel && iscapturable) {
+						//if ((ActiveCFEPatchConfig.EnableInstantCapture || tech->Health_Ratio() <= EngineerCaptureLevel) && iscapturable) {
+						if ((Rule.EngineerInstantCapture || tech->Health_Ratio() <= EngineerCaptureLevel) && iscapturable) {
 #else
-						if (tech->Health_Ratio() <= Rule.ConditionRed && iscapturable) {
+						//if ((ActiveCFEPatchConfig.EnableInstantCapture || tech->Health_Ratio() <= Rule.ConditionRed) && iscapturable) {
+						if ((Rule.EngineerInstantCapture || tech->Health_Ratio() <= Rule.ConditionRed) && iscapturable) {
 #endif
 							if (tech->Trigger.Is_Valid()) {
 								tech->Trigger->Spring(TEVENT_PLAYER_ENTERED, this);
@@ -689,7 +696,11 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 							tech->Trigger->Spring(TEVENT_SPIED, this);
 						}
 
-						if (IsOwnedByPlayer) Speak(VOX_BUILDING_INFILTRATED);
+						// Chthon CFE Note: Fix for MP
+						//if (IsOwnedByPlayer) Speak(VOX_BUILDING_INFILTRATED);
+						if (House->IsHuman){
+                            Speak(VOX_BUILDING_INFILTRATED, House);
+                        }
 
 						tech->Mark(MARK_OVERLAP_UP);
 						tech->SpiedBy |= housespy;
@@ -750,7 +761,14 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 									** then give the thief up to half the capacity of the
 									** storage facility.
 									*/
-									if (IsOwnedByPlayer || bldg->IsOwnedByPlayer) Speak(VOX_MONEY_STOLEN);
+									// Chthon CFE Note: Fix for MP
+                                    //if (IsOwnedByPlayer || bldg->IsOwnedByPlayer) Speak(VOX_MONEY_STOLEN);
+                                    if (House->IsHuman){
+                                        Speak(VOX_MONEY_STOLEN, House);
+                                    }
+                                    if (bldg->House->IsHuman){
+                                        Speak(VOX_MONEY_STOLEN, bldg->House);
+                                    }
 #ifdef OBSOLETE
 									long capacity = bldg->Class->Capacity * 256;
 									capacity /= (bldg->House->Tiberium+1);
@@ -872,9 +890,15 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 				} else {
 	#endif
 					if (!Target_Legal(NavCom)) {
-						Enter_Idle_Mode();
-						if (Map[Coord].Cell_Building()) {
-							Scatter(0, true);
+						//By Bast75. AI infantry like the Engineers should keep attacking
+						if (!House->IsHuman) {
+							Assign_Mission(MISSION_HUNT);
+						}
+						else {
+							Enter_Idle_Mode();
+							if (Map[Coord].Cell_Building()) {
+								Scatter(0, true);
+							}
 						}
 					}
 	#ifdef OBSOLETE
@@ -906,8 +930,10 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 			if (building != NULL && building->As_Target() == NavCom) {
 				if (!building->IronCurtainCountDown && building->Mission != MISSION_DECONSTRUCTION) {
 					building->IsGoingToBlow = true;
-					building->Clicked_As_Target(PlayerPtr->Class->House, (Rule.C4Delay * TICKS_PER_MINUTE) / 2); // 2019/09/20 JAS - Added record of who clicked on the object
-					building->Clicked_As_Target(building->Owner(), (Rule.C4Delay * TICKS_PER_MINUTE) / 2);
+					// Chthon CFE Note: this is wrong! in LAN multiplayer shows flash for the server, not necessarily the bomber
+                    //building->Clicked_As_Target(PlayerPtr->Class->House, (Rule.C4Delay * TICKS_PER_MINUTE) / 2); // 2019/09/20 JAS - Added record of who clicked on the object
+					building->Clicked_As_Target(Owner(), (Rule.C4Delay * TICKS_PER_MINUTE) / 2);
+                    building->Clicked_As_Target(building->Owner(), (Rule.C4Delay * TICKS_PER_MINUTE) / 2);
 					building->CountDown = Rule.C4Delay * TICKS_PER_MINUTE;
 					building->WhomToRepay = As_Target();
 				}
@@ -959,7 +985,9 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 			**	Special voice play.
 			*/
 			if (*this ==  INFANTRY_TANYA) {
-				Sound_Effect(VOC_TANYA_LAUGH, Coord);
+                // Chthon CFE Note: vanilla bigfix, this should be audible to all players
+				//Sound_Effect(VOC_TANYA_LAUGH, Coord);
+                CFE_Patch_Sound_Effect_For_All_Humans(VOC_TANYA_LAUGH, Coord);
 			}
 
 			/*
@@ -990,6 +1018,11 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 			*/
 			COORDINATE blcoord = bldng->Center_Coord();
 			new AnimClass(Combat_Anim(Rule.APMineDamage, WARHEAD_HE, cellptr->Land_Type()), blcoord);
+             // Chthon CFE Note: pass the mine's WhoLaidMe so the minelayer can gain XP
+            TARGET whosetusupthebomb = bldng->WhoLaidMe;
+            // Chthon CFE Note: landmine inherited its veterancy from the minelayer that laid it
+            // do 10% bonus per rank b/c rate of fire bonus is meaningless in this case
+            float vbonus = 1.0 + (0.1 * bldng->VeterancyRank);
 			delete bldng;
 			int damage;
 			for (int index = 0; index < Infantry.Count(); index++) {
@@ -997,8 +1030,9 @@ void InfantryClass::Per_Cell_Process(PCPType why)
 				if (obj != NULL && !obj->IsInLimbo) {
 					int dist = ::Distance(obj->Coord, blcoord);
 					if (dist <= 0xC0) {
-						damage = Rule.APMineDamage;
-						obj->Take_Damage(damage, 0, WARHEAD_HE);
+						damage = Rule.APMineDamage * vbonus;
+						//obj->Take_Damage(damage, 0, WARHEAD_HE);
+                        obj->Take_Damage(damage, 0, WARHEAD_HE, NULL, false, whosetusupthebomb);
 					}
 				}
 			}
@@ -1208,6 +1242,7 @@ void InfantryClass::Assign_Target(TARGET target)
 			target = TARGET_NONE;
 		}
 	}
+
 	FootClass::Assign_Target(target);
 
 	/*
@@ -1220,6 +1255,12 @@ void InfantryClass::Assign_Target(TARGET target)
 			Assign_Destination(target);
 		}
 	}
+	
+	// Chthon CFE Note: Rank3 veteran dogs use "alpha howl" when aggroing
+	if (Class->IsDog && (VeterancyRank == 3) && Target_Legal(TarCom)){
+        AlphaPuppersHowl();
+    }
+	
 }
 
 
@@ -1322,6 +1363,59 @@ void InfantryClass::AI(void)
 	**	Perform movement operations at this time.
 	*/
 	Movement_AI();
+    
+    // Chthon CFE Note: We may be dead at this point and still doing a death animation
+    // or we have have finished the death animation and Doing_AI() deleted this unit
+    // we need to check for both cases to make sure we're still alive
+    // (not sure how WW got away with putting Movement_AI() after Doing_AI()...
+    if (IsActive && !IsInLimbo && Strength){
+    
+        // Chthon CFE Note: Extremely ugly hack to get rank 3 veteran medics to heal themselves
+        // Just using Fire_At() is buggy since there's no animation and the healing missile doesn't hit
+        // So let's fake the firing logic entirely
+        if (   (*this == INFANTRY_MEDIC) &&
+                (VeterancyRank == 3) &&
+                !IsDriving &&
+                (
+                    (Doing == DO_NOTHING) ||
+                    MasterDoControls[Doing].Interrupt
+                ) &&
+                (Health_Ratio() < Rule.ConditionGreen) &&
+                (   (Mission == MISSION_GUARD) || (Mission == MISSION_GUARD_AREA) ) &&
+                !Target_Legal(TarCom) &&
+                !Arm &&
+                !IsFiring
+        ){
+            if (IsProne) {
+                Do_Action(DO_FIRE_PRONE);
+            } else {
+                Do_Action(DO_FIRE_WEAPON);
+            }
+            Mark(MARK_OVERLAP_UP);
+            IsFiring = true; // I *think* this should get cleared in Firing_AI() on the next clock tick
+            Mark(MARK_OVERLAP_DOWN);
+            WeaponTypeClass const * weapon = Techno_Type_Class()->PrimaryWeapon;
+            int firepower = weapon->Attack * FixedToFloat(FirepowerBias) * FixedToFloat(House->FirepowerBias);
+            // skip the whole missile business and just heal directly
+            Strength -= firepower; // subract b/c firepower is negative
+            if (Strength > Class_Of().MaxStrength){
+                Strength = Class_Of().MaxStrength;
+            }
+            Arm = Rearm_Delay(IsSecondShot, 0);
+            Sound_Effect(weapon->Sound, Coord);
+            Clicked_As_Target(HOUSE_COUNT, 7); // HOUSE_COUNT means everyone can see it
+            Mark(MARK_CHANGE);
+        }
+        
+        // dogs can smell cloaked infantry (rank 3 veteran Tanya)
+        // well, actually, we'll uncloack for them
+        if (IsCloakable && ((Cloak == CLOAKED) || (Cloak == CLOAKING)) && UnfriendlyDogCheck()){
+            Do_Uncloak();
+        }
+        
+    } // end if IsActive && Strength
+    
+    
 }
 
 
@@ -1466,7 +1560,9 @@ MoveType InfantryClass::Can_Enter_Cell(CELL cell, FacingType ) const
 						**	This depends on whether the unit is currently moving or not.
 						*/
 						case RTTI_UNIT:
-							if (((UnitClass *)obj)->IsDriving || Target_Legal(((UnitClass *)obj)->NavCom)) {
+							// Chthon CFE Note: consider other units in attack-move mode to be moving for purposes of blocking
+                            // actually, no...
+                            if (((UnitClass *)obj)->IsDriving || Target_Legal(((UnitClass *)obj)->NavCom) /*|| Target_Legal(((UnitClass *)obj)->RememberedNavCom)*/) {
 								if (retval < MOVE_MOVING_BLOCK) retval = MOVE_MOVING_BLOCK;
 							} else {
 								if (retval < MOVE_TEMP) retval = MOVE_TEMP;
@@ -1705,7 +1801,9 @@ FireErrorType InfantryClass::Can_Fire(TARGET target, int which) const
 #else
 		InfantryClass * targ = As_Infantry(target);
 #endif
-		if (targ == NULL || targ->Health_Ratio() >= Rule.ConditionGreen) {
+		//By Bast75, medic and mechanic have negative combat damage, they should not attack enemies. Otherwise they heal them
+		//if (targ == NULL || targ->Health_Ratio() >= Rule.ConditionGreen) {
+		if (targ == NULL || !targ->House.Is_Valid() || targ->Health_Ratio() >= Rule.ConditionGreen || !targ->House->Is_Ally(this)) {
 			return(FIRE_ILLEGAL);
 		}
 	}
@@ -1816,7 +1914,12 @@ void InfantryClass::Enter_Idle_Mode(bool )
 			}
 		} else {
 
-			if (Mission == MISSION_GUARD || Mission == MISSION_GUARD_AREA || MissionControl[Mission].IsZombie || MissionControl[Mission].IsParalyzed) {
+			if (    (Mission == MISSION_GUARD) ||
+                    (Mission == MISSION_GUARD_AREA) ||
+                    (   (Mission != MISSION_NONE) &&
+                        ((MissionControl[Mission].IsZombie) || (MissionControl[Mission].IsParalyzed))
+                    )
+            ) {
 				return;
 			}
 
@@ -1843,6 +1946,23 @@ void InfantryClass::Enter_Idle_Mode(bool )
 				}
 			}
 		}
+	}
+    if ((order == MISSION_GUARD) && AttackMove) {
+		// Attack Move rework by ChthonVII --  As Infantry does GUARD at the end, the Mission_Move method where usually the reset starts is never called
+		// therefore this hack
+        // Let's be a little more careful and hopefully avoid units falling out of attack move early
+        // fall out of attack move if we forgot our destination, we arrived (or got close), or don't have a path
+        if (    !Target_Legal(RememberedNavCom) ||
+                (Distance(RememberedNavCom) < Rule.CloseEnoughDistance) ||
+                !Find_Path_AStar(nullptr, Coord_Cell(Coord), As_Cell(RememberedNavCom), 1, MOVE_MOVING_BLOCK, -1)
+        ){
+            ResetAttackMove();
+        }
+        // otherwise go back to moving
+        else {
+            AttackMoveEnterMoveMode();
+            return;
+        }
 	}
 	Assign_Mission(order);
 }
@@ -1921,9 +2041,16 @@ bool InfantryClass::Random_Animate(void)
 				Mark(MARK_CHANGE_REDRAW);
 				PrimaryFacing.Set(Facing_Dir(Random_Pick(FACING_N, FACING_NW)));
 				Mark(MARK_CHANGE_REDRAW);
-				if (!Is_Selected_By_Player() && IsOwnedByPlayer && *this == INFANTRY_TANYA && Sim_Random_Pick(0, 2) == 0) {
+                // Chthon CFE Note: This no longer works as intended in MP due to Petroglyph's PlayerPtr shenanigans
+				/*
+                if (!Is_Selected_By_Player() && IsOwnedByPlayer && *this == INFANTRY_TANYA && Sim_Random_Pick(0, 2) == 0) {
 					Sound_Effect(VOC_TANYA_SHAKE, Coord);
 				}
+				*/
+				if ((*this == INFANTRY_TANYA) && House->IsHuman && !Is_Selected_By_Player(House) && (Random_Pick(0,2) == 0)){
+                    On_Sound_Effect(House, (int)VOC_TANYA_SHAKE, "", 1, Coord);
+                }
+				
 				break;
 
 			/*
@@ -1990,7 +2117,7 @@ void InfantryClass::Scatter(COORDINATE threat, bool forced, bool nokidding)
 	**	Certain missions prevent scattering regardless of whether it would be
 	**	a good idea or not.
 	*/
-	if (!MissionControl[Mission].IsScatter && !forced) return;
+	if ((Mission != MISSION_NONE) && !MissionControl[Mission].IsScatter && !forced) return;
 
 	/*
 	**	If the infantry is currently engaged in legitimate combat, then don't
@@ -2265,7 +2392,7 @@ bool InfantryClass::Start_Driver(COORDINATE & headto)
 		/*
 		**	Remove the occupation bit from the infantry's current location.
 		*/
-  		Clear_Occupy_Bit(Coord);
+		Clear_Occupy_Bit(Coord);
 
 		/*
 		**	Set the occupation bit for the new headto location.
@@ -2457,7 +2584,13 @@ TARGET InfantryClass::Greatest_Threat(ThreatType threat) const
 	**	human player.
 	*/
 	if (*this == INFANTRY_TANYA && House->IsHuman) {
-		return(TARGET_NONE);
+        if ((Rule.EnableTanyaGuard == 2) || ((Rule.EnableTanyaGuard == 1) && (Session.Type != GAME_NORMAL))){
+            // Chthon CFE Note -- only target infantry, since colts aren't meaninful against other stuff, and Tanya doesn't switch to bombs for buildings
+            return(TechnoClass::Greatest_Threat((threat & (THREAT_RANGE | THREAT_AREA)) | THREAT_INFANTRY));
+        }
+        else {
+            return(TARGET_NONE);
+        }
 	}
 
 	if (Class->PrimaryWeapon != NULL) {
@@ -2477,8 +2610,9 @@ TARGET InfantryClass::Greatest_Threat(ThreatType threat) const
 
 	/*
 	**	Human controlled infantry don't automatically fire upon buildings.
+    * **  Attack Move rework by ChthonVII -- In attack move mode, attack the buildings as well
 	*/
-	if (Is_Weapon_Equipped() && House->IsHuman) {
+	if (Is_Weapon_Equipped() && House->IsHuman && !AttackMove) {
 		threat = threat & ~THREAT_BUILDINGS;
 	}
 
@@ -2554,7 +2688,7 @@ void InfantryClass::Response_Select(void)
 		HousesType house = PlayerPtr->ActLike;
 		switch (Class->Type) {
 			case INFANTRY_GENERAL:
-				if (house != HOUSE_USSR && house != HOUSE_BAD) {
+				if (house != HOUSE_USSR && house != HOUSE_BAD && house != HOUSE_UKRAINE) {
 					response = _stavros;
 					size = ARRAY_SIZE(_stavros);
 				} else {
@@ -2682,7 +2816,7 @@ void InfantryClass::Response_Move(void)
 		HousesType house = PlayerPtr->ActLike;
 		switch (Class->Type) {
 			case INFANTRY_GENERAL:
-				if (house != HOUSE_USSR && house != HOUSE_BAD) {
+				if (house != HOUSE_USSR && house != HOUSE_BAD && house != HOUSE_UKRAINE) {
 					response = _stavros;
 					size = ARRAY_SIZE(_stavros);
 				} else {
@@ -2813,7 +2947,7 @@ void InfantryClass::Response_Attack(void)
 		HousesType house = PlayerPtr->ActLike;
 		switch (Class->Type) {
 			case INFANTRY_GENERAL:
-				if (house != HOUSE_USSR && house != HOUSE_BAD) {
+				if (house != HOUSE_USSR && house != HOUSE_BAD && house != HOUSE_UKRAINE) {
 					response = _stavros;
 					size = ARRAY_SIZE(_stavros);
 				} else {
@@ -2929,9 +3063,11 @@ ActionType InfantryClass::What_Action(ObjectClass const * object) const
 
 				if (bldg->Can_Capture()) {
 #ifdef FIXIT_ENGINEER	//	checked - ajw 9/28/98
-					if (bldg->Health_Ratio() <= EngineerCaptureLevel) {
+					//if (ActiveCFEPatchConfig.EnableInstantCapture || bldg->Health_Ratio() <= EngineerCaptureLevel) {
+					if (Rule.EngineerInstantCapture || bldg->Health_Ratio() <= EngineerCaptureLevel) {
 #else
-					if (bldg->Health_Ratio() <= Rule.ConditionRed) {
+					//if (ActiveCFEPatchConfig.EnableInstantCapture || bldg->Health_Ratio() <= Rule.ConditionRed) {
+					if (Rule.EngineerInstantCapture || bldg->Health_Ratio() <= Rule.ConditionRed) {
 #endif
 						return(ACTION_CAPTURE);
 					}
@@ -2951,7 +3087,7 @@ ActionType InfantryClass::What_Action(ObjectClass const * object) const
 	if (Combat_Damage() < 0 && House->IsPlayerControl) {
 		if (House->Is_Ally(object)) {
 #ifdef FIXIT_CSII	//	checked - ajw 9/28/98
-			if( (object->What_Am_I() == RTTI_INFANTRY && object != this && *this == INFANTRY_MEDIC) ||
+			if( (object->What_Am_I() == RTTI_INFANTRY && (object != this) && *this == INFANTRY_MEDIC) ||
 			    (*this == INFANTRY_MECHANIC && (object->What_Am_I() == RTTI_UNIT || object->What_Am_I() == RTTI_AIRCRAFT) ) ) {
 
 					if (object->Health_Ratio() < Rule.ConditionGreen) {
@@ -2970,8 +3106,8 @@ ActionType InfantryClass::What_Action(ObjectClass const * object) const
 			}
 #endif
 			if(!object->Is_Techno() || !((TechnoClass *)object)->Techno_Type_Class()->Max_Passengers()) {
-				if (action == ACTION_GUARD_AREA || action == ACTION_MOVE) {
-					return(action);
+				if (action == ACTION_GUARD_AREA || action == ACTION_MOVE || action == ACTION_ATTACKMOVE) {  // Attack Move rework by ChthonVII -- treat attack_move same as move
+ 					return(action);
 				}
 				return ((action == ACTION_TOGGLE_SELECT) ? ACTION_TOGGLE_SELECT : ACTION_SELECT);
 			}
@@ -3020,7 +3156,16 @@ ActionType InfantryClass::What_Action(ObjectClass const * object) const
 	*/
 	if (action == ACTION_NONE && object->What_Am_I() == RTTI_BUILDING && House->IsPlayerControl) {
 		StructType blah = *((BuildingClass *)object);
-		if (blah == STRUCT_AVMINE || blah == STRUCT_APMINE) return(ACTION_MOVE);
+		if (blah == STRUCT_AVMINE || blah == STRUCT_APMINE){
+            // Attack Move rework by ChthonVII -- we need this here so that we can attack-move to cells that the InfantryClass-level makes movable (e.g., landmines) 
+			//if (ActiveCFEPatchConfig.EnableAttackMove && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+            if (Rule.AttackMoveCommandAllowed && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+                return(ACTION_ATTACKMOVE);
+            }
+            else {
+                return(ACTION_MOVE);
+            }
+        }
 	}
 
 	/*
@@ -3156,6 +3301,7 @@ void InfantryClass::Active_Click_With(ActionType action, ObjectClass * object)
 		case ACTION_ATTACK:
 		case ACTION_GUARD_AREA:
 		case ACTION_MOVE:
+        case ACTION_ATTACKMOVE: // Attack Move rework by ChthonVII -- treat like move
 			action = action;
 			break;
 
@@ -3349,7 +3495,8 @@ ActionType InfantryClass::What_Action(CELL cell) const
 	/*
 	**	Demolitioners may destroy a bridge
 	*/
-	if (Class->IsBomber && action == ACTION_MOVE && !Special.IsCaptureTheFlag) {
+     // Attack Move rework by ChthonVII -- do attack move on way to blow up a bridge
+	if (Class->IsBomber && (action == ACTION_MOVE || action == ACTION_ATTACKMOVE) && !Special.IsCaptureTheFlag) {
 		switch (Map[cell].TType) {
 			case TEMPLATE_BRIDGE1:
 			case TEMPLATE_BRIDGE2:
@@ -3763,7 +3910,12 @@ void InfantryClass::Firing_AI(void)
 
 				case FIRE_CLOAKED:
 					Do_Uncloak();
-					break;
+                    // Chthon CFE Note: If stealth Tanya, accelerate the decloak
+                    if ((*this == INFANTRY_TANYA) && (VeterancyRank == 3)) {
+                        CloakingDevice.Graphic_Logic();
+                        CloakingDevice.Graphic_Logic();
+                    }
+                    break;
 
 				case FIRE_OK:
 					/*
@@ -3822,6 +3974,19 @@ void InfantryClass::Firing_AI(void)
 				** If it's a dog, get rid of him (he'll be re-created when he hits)
 				*/
 				if (Class->IsDog) {
+                    // Chthon CFE Note: Give the target (e.g. rank 3 veteran Tanya) a cloak delay so it can't recloak while the dog is in flight
+                    ObjectClass* targ= As_Object(TarCom);
+                    if (    targ &&
+                            targ->IsActive &&
+                            (targ->What_Am_I() == RTTI_INFANTRY) &&
+                            ((InfantryClass*)targ)->IsCloakable &&
+                            (((InfantryClass*)targ)->Cloak != CLOAKED) &&
+                            (((InfantryClass*)targ)->Cloak != CLOAKING) &&
+                            (((InfantryClass*)targ)->CloakDelay < 2*TICKS_PER_SECOND)
+                       ){
+                        ((InfantryClass*)targ)->CloakDelay = 2*TICKS_PER_SECOND;
+                    }
+                    
 					WasSelected = IsSelected;
 					ScenarioInit++;
 					Limbo();
@@ -3973,7 +4138,8 @@ void InfantryClass::Movement_AI(void)
 			/*
 			**	Scatter infantry off buildings in guard modes.
 			*/
-			if (!IsTethered && (Mission == MISSION_GUARD || Mission == MISSION_GUARD_AREA) && MissionQueue == MISSION_NONE && Map[Coord].Cell_Building() != NULL) {
+            // Chthon CFE Note: bugfix missing IsActive check, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/430
+			if (IsActive && !IsTethered && (Mission == MISSION_GUARD || Mission == MISSION_GUARD_AREA) && MissionQueue == MISSION_NONE && Map[Coord].Cell_Building() != NULL) {
 				Scatter(0, true, true);
 			}
 
@@ -4059,8 +4225,10 @@ void InfantryClass::Movement_AI(void)
 								if (TryTryAgain) {
 									TryTryAgain--;
 								} else {
-									if (IsNewNavCom) Sound_Effect(VOC_SCOLD);
-									IsNewNavCom = false;
+                                    // Chthon CFE Note: fix for MP
+									//if (IsNewNavCom) Sound_Effect(VOC_SCOLD);
+									if (IsNewNavCom && House->IsHuman) On_Sound_Effect(House, (int)VOC_SCOLD, "", 1, Coord);
+                                    IsNewNavCom = false;
 
 									//If we're trying to enter a transport we need to fail so others can try to enter. - LLL 4/17/2020
 									if (Mission == MISSION_ENTER) {
@@ -4099,17 +4267,35 @@ void InfantryClass::Movement_AI(void)
 				COORDINATE acoord = Adjacent_Cell(Coord, Path[0]);
 				CELL acell = Coord_Cell(acoord);
 
-				if (Can_Enter_Cell(acell) != MOVE_OK) {
-
+                MoveType cando = Can_Enter_Cell(acell);
+				//if (Can_Enter_Cell(acell) != MOVE_OK) {
+                if (cando != MOVE_OK) {
+                
 					if ((Mission == MISSION_MOVE || Mission == MISSION_ENTER) && !IsTethered /*&& House->IsHuman*/ && Distance(NavCom) < Rule.CloseEnoughDistance) {
 						Assign_Destination(TARGET_NONE);
-					} else {
+					}
+					/* // this turned out to be unnecessary
+					else if (
+                        AttackMove &&
+                        ((Mission == MISSION_MOVE) || (Mission == MISSION_ENTER)) &&
+                        !IsTethered &&
+                        (cando != MOVE_DESTROYABLE) &&
+                        (cando != MOVE_CLOAK) &&
+                        RememberedNavCom &&
+                        (Distance(RememberedNavCom) < Rule.CloseEnoughDistance)
+                    ){
+                        ResetAttackMove();
+                        Assign_Destination(TARGET_NONE);
+                    }
+                    */
+					else {
 
 						/*
 						** If blocked by a moving block then just exit start of move and
 						** try again next tick.
 						*/
-						if (Can_Enter_Cell(acell) == MOVE_DESTROYABLE) {
+						//if (Can_Enter_Cell(acell) == MOVE_DESTROYABLE) {
+                        if (cando == MOVE_DESTROYABLE) {
 							if (Map[acell].Cell_Object()) {
 								if (!House->Is_Ally(Map[acell].Cell_Object())) {
 									Override_Mission(MISSION_ATTACK, Map[acell].Cell_Object()->As_Target(), TARGET_NONE);
@@ -4124,8 +4310,10 @@ void InfantryClass::Movement_AI(void)
 
 					Path[0] = FACING_NONE;
 					Stop_Driver();
-					if (IsNewNavCom) Sound_Effect(VOC_SCOLD);
-					IsNewNavCom = false;
+					// Chthon CFE Note: Fix for MP
+                    //if (IsNewNavCom) Sound_Effect(VOC_SCOLD);
+					if (IsNewNavCom && House->IsHuman) On_Sound_Effect(House, (int)VOC_SCOLD, "", 1, Coord);
+                    IsNewNavCom = false;
 
 				} else {
 					if (Start_Driver(acoord)) {
@@ -4144,6 +4332,10 @@ void InfantryClass::Movement_AI(void)
 							*/
 							if (Target_Legal(TarCom)) {
 								Do_Action(DO_CRAWL);
+                                // Chthon CFE Note: Rank3 veteran dogs use "alpha howl" periodically while chasing
+                                if ((VeterancyRank == 3) && (Frame % (3*TICKS_PER_SECOND) == 0)){
+                                    AlphaPuppersHowl();
+                                }
 							} else {
 								Do_Action(DO_WALK);
 							}
@@ -4170,7 +4362,9 @@ void InfantryClass::Movement_AI(void)
 			Mark(MARK_UP);
 			if (Distance(Head_To_Coord()) < 0x0010) {
 
-				memcpy(&Path[0], &Path[1], sizeof(Path)-sizeof(Path[0]));
+                // Chthon CFE Note: replace memcopy with memmove when source and destination may overlap, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/608
+				//memcpy(&Path[0], &Path[1], sizeof(Path)-sizeof(Path[0]));
+                memmove(&Path[0], &Path[1], sizeof(Path)-sizeof(Path[0]));
 				Path[(sizeof(Path)/sizeof(Path[0]))-1] = FACING_NONE;
 				Coord = Head_To_Coord();
 				Per_Cell_Process(PCP_END);
@@ -4351,4 +4545,52 @@ bool InfantryClass::Paradrop(COORDINATE coord)
 		return(true);
 	}
 	return(false);
+}
+
+
+// Chthon CFE Note: New function
+// Rank3 veteran dogs can "howl."
+// The howl causes other dogs in range of the same house to aggro to this dog's target if they don't already have a target.
+// Range is 6 cells. This is arbitrary and subject to change once I see how well it works in game.
+// Too small. Let's try 10.
+void InfantryClass::AlphaPuppersHowl(){
+    
+    // bail if this doggo doesn't have a valid target to share
+    if (!Target_Legal(TarCom)){
+        return;
+    }
+    
+    for (int i = 0; i < Infantry.Count(); i++) {
+        InfantryClass* iptr = Infantry.Ptr(i);
+        if (iptr && iptr->IsActive && !iptr->IsInLimbo && iptr->Class->IsDog && (House == iptr->House) && (Distance(iptr) <= (10*CELL_LEPTON_W))){
+            if (!Target_Legal(iptr->TarCom)){
+                iptr->Assign_Destination(TARGET_NONE);
+                //iptr->Stop_Driver();
+                iptr->Assign_Target(TarCom);
+                iptr->Assign_Mission(MISSION_ATTACK);
+                //iptr->Commence();
+            }
+        }
+        
+    }
+    return;
+}
+
+
+// returns true if within the guard radius of an unfriendly dog
+bool InfantryClass::UnfriendlyDogCheck(){
+    
+    if (!IsActive || IsInLimbo || !Strength){
+        return false;
+    }
+    
+    for (int i = 0; i < Infantry.Count(); i++) {
+        InfantryClass* iptr = Infantry.Ptr(i);
+        if (iptr && iptr->IsActive && !iptr->IsInLimbo && iptr->Class->IsDog && !House->Is_Ally(iptr) && (Distance(iptr) <= iptr->Techno_Type_Class()->ThreatRange)){
+            return true;
+        }
+        
+    }
+    return false;
+    
 }

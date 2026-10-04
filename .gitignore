@@ -1,9 +1,21 @@
-
-# Visual Studio files
+# Visual Studio local settings and build output
 .vs/
 *.user
-
-# Output object and binary folders
 [Dd]ebug/
 [Rr]elease/
 [Bb]in/
+[Bb]uild/
+*.obj
+*.pdb
+*.pch
+*.ilk
+*.idb
+*.tlog
+
+# Local review material and changelog folder (excluded from publication)
+/[Rr]eview/
+/[Cc]hangelogs/
+
+# Python test caches
+__pycache__/
+*.py[cod]

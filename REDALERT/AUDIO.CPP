@@ -284,6 +284,19 @@ struct SoundEffectNameStruct {
 	{"BEACON", 		10,	IN_NOVAR},	// VOC_BEACON			Beacon sound.
 
 #endif
+    
+    //Chthon CFE Note: add a sound for veterancy promotions
+    {"PROMOTED", 		10,	IN_NOVAR },
+    
+    //Chthon CFE Note: add a sound for infantry stealth
+    {"WINDGUST", 		10,	IN_NOVAR },
+    
+    //Chthon CFE Note: clone so we can muck with xml in our own file
+    {"CONSTCLN",	10,	IN_NOVAR},	// VOC_CONSTRUCTION_CLONE	construction sounds
+    
+    //Chthon CFE Note: clone so we can muck with xml in our own file
+    {"CASHTCLN", 	10,		IN_NOVAR},	//	VOC_CASHTURN_CLONE		Sound of money being piled up.
+    
 };
 
 
@@ -663,7 +676,8 @@ int Sound_Effect(VocType voc, fixed volume, int variation, signed short pan_valu
 	"AAVAIL1",		//	VOX_ABOMB_AVAILABLE
 	"AARRIVE1",		//	VOX_ALLIED_REINFORCEMENTS
 	"SAVE1",			//	VOX_MISSION_SAVED
-	"LOAD1"			//	VOX_MISSION_LOADED
+	"LOAD1",			//	VOX_MISSION_LOADED
+    "STRUCAP1"      // VOX_BUILDING_CAPTURE -- Chthon CFE Note: add the generic "building captured" voice that has a sound file but WW never finished adding to the game
 };
 
 

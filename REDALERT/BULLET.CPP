@@ -51,6 +51,7 @@
 
 #include	"function.h"
 
+//#include "cfedebug.h"
 
 /***********************************************************************************************
  * BulletClass::BulletClass -- Bullet constructor.                                             *
@@ -87,6 +88,10 @@ BulletClass::BulletClass(BulletType id, TARGET target, TechnoClass * payback, in
 {
 	Strength = strength;
 	Height = FLIGHT_LEVEL;
+    
+    // Chthon CFE Note: Initilaize mod stuff
+    SpecialArmorPen = ARMORPEN_NONE;
+    
 }
 
 
@@ -139,6 +144,15 @@ BulletClass::~BulletClass(void)
 				** we can put him down.  If all 8 adjacent cell checks fail, then
 				** just delete the dog.
 				*/
+                // Attack Move rework by ChthonVII -- dog is going to Enter_Idle_Mode(), and thus fall out of attack-move, when it unlimbos.
+                // So we need to save that info now
+                unsigned int resumeattackmove = dog->AttackMove;
+                TARGET resumerememberednavcom = dog->RememberedNavCom;
+                // we also need to skip navqueue processing if this is q-attack-move
+                if (dog->AttackMove){
+                    dog->SkipNavQueueUpdate = true;
+                }
+                
 				for (int i = -1; i < 8; i++) {
 					if (i != -1) {
 						newcoord = Adjacent_Cell(Coord, FacingType(i));
@@ -153,6 +167,13 @@ BulletClass::~BulletClass(void)
 						ScenarioInit--;
 
 						unlimbo = true;
+                        // Attack Move rework by ChthonVII -- restore dog back into attack-move state
+                        if (resumeattackmove){
+                            dog->AttackMove = 1;
+                            dog->RememberedNavCom = resumerememberednavcom;
+                            dog->AttackMoveEnterMoveMode();
+                            dog->SkipNavQueueUpdate = false;;
+                        }
 						break;
 					}
 					ScenarioInit--;
@@ -670,6 +691,16 @@ void BulletClass::Detach(TARGET target, bool all)
 }
 
 
+// Chthon CFE Note: version that detaches only the incoming bullets
+// for use with chronoshift
+void BulletClass::MinimalDetach(TARGET target)
+{
+	if (target == TarCom) {
+		TarCom = TARGET_NONE;
+	}
+}
+
+
 /***********************************************************************************************
  * BulletClass::Unlimbo -- Transitions a bullet object into the game render/logic system.      *
  *                                                                                             *
@@ -728,11 +759,12 @@ bool BulletClass::Unlimbo(COORDINATE coord, DirType dir)
 			**	Circular Error of Probability (CEP) algorithm. High speed projectiles usually
 			**	just overshoot the target by extending the straight line flight.
 			*/
-			if (/*Class->ROT != 0 ||*/ Class->IsArcing) {
+            //Chthon CFE Note: bugfix as per https://ppmforums.com/topic-52395/the-lol-ww-wtf-omg-series/?sid=0615f7e6bbfa6f79d5b8a79981bb3258
+			//if (/*Class->ROT != 0 ||*/ Class->IsArcing) {
+            if ((Rule.EnableInaccuracyBugfix && Class->ROT != 0) || Class->IsArcing) {
 				int scatterdist = (::Distance(coord, tcoord)/16)-0x0040;
 				scatterdist = min(scatterdist, Rule.HomingScatter);
 				scatterdist = max(scatterdist, 0);
-
 				dir = (DirType)((dir + (Random_Pick(0, 10)-5)) & 0x00FF);
 				tcoord = Coord_Scatter(tcoord, Random_Pick(0, scatterdist));
 			} else {
@@ -1002,7 +1034,8 @@ void BulletClass::Bullet_Explodes(bool forced)
 	**	Non-aircraft targets apply damage to the ground.
 	*/
 	if (!Is_Target_Aircraft(TarCom) || As_Aircraft(TarCom)->In_Which_Layer() == LAYER_GROUND) {
-		Explosion_Damage(Coord, Strength, Payback, Warhead);
+		Explosion_Damage(Coord, Strength, Payback, Warhead, SpecialArmorPen);
+        // Chthon CFE Note: pass on special armor pen
 		if (!IsActive) return;
 
 	} else {
@@ -1015,7 +1048,8 @@ void BulletClass::Bullet_Explodes(bool forced)
 			AircraftClass * object = As_Aircraft(TarCom);
 
 			int str = Strength;
-			if (object) object->Take_Damage(str, 0, Warhead, Payback);
+			if (object) object->Take_Damage(str, 0, Warhead, Payback, false, NULL, SpecialArmorPen);
+            // Chthon CFE Note: pass on special armor pen
 		}
 	}
 

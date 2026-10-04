@@ -30,7 +30,10 @@
 
 extern "C" void __cdecl Mem_Copy(void const *source, void *dest, unsigned long bytes_to_copy)
 {
-	memcpy(dest, source, bytes_to_copy);
+    // Chthon CFE Note: bugfix, don't call memcpy when dest == source, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/2337807b09848ed63e36ea8341cead3210308684
+	if (dest != source) {
+        memcpy(dest, source, bytes_to_copy);
+    }
 }			  
 
 
@@ -428,7 +431,7 @@ dxisbig:
 #if (0)
 
 /*
-	; $Header: //depot/Projects/Mobius/QA/Project/Run/SOURCECODE/REDALERT/MiscAsm.cpp#139 $
+	; $Header: //depot/Projects/Mobius/QA/Project/Run/SOURCECODE/REDALERT/MiscAsm.cpp#138 $
 ;***************************************************************************
 ;**   C O N F I D E N T I A L --- W E S T W O O D   A S S O C I A T E S   **
 ;***************************************************************************

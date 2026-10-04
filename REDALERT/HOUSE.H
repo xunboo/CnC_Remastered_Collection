@@ -40,6 +40,8 @@
 #include	"vector.h"
 #include "Credits.h"
 
+namespace AIStrategy { struct EnemyForces; }
+
 class TriggerClass;
 class FootClass;
 class FactoryClass;
@@ -424,6 +426,104 @@ class HouseClass {
 		long Tiberium;
 		long Credits;
 		long Capacity;
+
+		//By Bast75
+		unsigned int current = 0;
+		int prio = 0; //Used to calculate prio.
+		int TempCalculation = 0;
+		int HumanBuildingCount = 0;
+		HouseClass const * enemy = NULL;
+
+		//check air-threat
+		bool airthreat = false;
+		int airthreat_quantity = 0;
+
+		int AIDogKennelLimit = 1;
+		int AIBarracksLimit = 1;
+		int AIWarFactoryLimit = 1;
+		int AINavalLimit = 1;
+		int AIHelipadAlliedLimit = 1;
+		int AIHelipadSovietLimit = 1;
+		int AIAirstripLimit = 1;
+		int AIAirdefenseLimit = 1;
+		int AIPillBoxLimit = 1;
+		int AICamoPillBoxLimit = 1;
+		int AITurretGunLimit = 1;
+		int AIFlameTurretLimit = 1;
+		int AITeslaGunLimit = 1;
+		int AIRefineryLimit = 1;
+		int AINukeLimit = 1;
+		int AIChronosphereLimit = 1;
+		int AIIronCurtainLimit = 1;
+		int AIRepairBayLimit = 1;
+		bool AIDetectedNavalWar = false;
+		bool AIDetectHumanGroundWar = false;
+		int AIGapLimit = 2;
+		int AIPowerPlus = 5;
+		//bool AIAttackModeDoClosest = false;
+		//int AINrOfMCVsProduced = 0;
+		int AIMaxBuildings = 75;
+		int AIMaxConYardsAndMCVs = 1;
+		int AIMaxTanksNr = 50;
+		int AIMaxNavalNr = 50;
+		int AIMaxInfantryNr = 50;
+		int AIMaxAirNr = 20;
+		//bool AIAttackMode = true;
+		int HasStolenTech = 0;
+		void SetStolenTech(void);
+		int LastStolenLocationX = 0;
+		int LastStolenLocationY = 0;
+		bool DoAntiHarvesterRun = false;
+
+		//For Dynamic AI
+		int IsHumanFriend = 0;
+		int DynamicBoost = 0;
+		int TotalBoost = 0;
+		int CountEnemiesForThisAI = 1; //We always start with a enemy
+		int CountFriendliesForThisAI = 0;
+		int CountHousesStillAlive = 2; //We always start with minimal 2 houses
+		int EnemyVessels = 0;
+		int AverageEnemyVessels = 0;
+		int NrOfHumanTanks = 0;
+
+		bool HouseHasFlag = false; //Not used yet, we need to improve capture the flag for AI in the future....
+
+		void AI_CalcDynamics(void);
+		AIStrategy::EnemyForces AI_Enemy_Forces(void) const;
+		bool AI_Has_Naval_Access(void) const;
+		int AI_Unit_Weight(UnitType type, AIStrategy::EnemyForces const & enemy) const;
+		void AI_StrategySwitcher(void);
+		bool firstrundone = false;
+		bool IncreaseLimitDone = false;
+		int IncreaseLimit = 1;
+		int AIPersonalStrategyMode = 0;
+		void DoMyDebugStuff(void);
+
+		//Used for MCV base expansion:
+		void AI_Calc2ndBaseLocations(void);
+		int AI_Interesting_Waypoints[WAYPT_COUNT] = {};
+		int ConstrYardCount = 0;
+		int PersonalCounter = 0;
+		bool AllowExtraBaseAtWaypoint = false;
+
+		//Trigger for AI production to remove multiple production hack - Mini Franki
+		bool VesselInProduction = false;
+		bool UnitInProduction = false;
+		bool InfantryInProduction = false;
+		bool BuildingInProduction = false;
+		bool AircraftInProduction = false;
+		int AICurrentNrOfWEAPs = 0;
+		int AICurrentSelectedWeap = 0;
+		int AICurrentNrOfBarracks = 0;
+		int AICurrentSelectedBarrack = 0;
+		int AICurrentNrOfTents = 0;
+		int AICurrentSelectedTent = 0;
+		int AICurrentNrOfSubPens = 0;
+		int AICurrentSelectedSubPen = 0;
+		int AICurrentNrOfShipYards = 0;
+		int AICurrentSelectedShipYard = 0;
+		int AICurrentNrOfConstYards = 0;
+		int AICurrentSelectedConstYard = 0;
 
 		/*
 		** Stuff to keep track of the total number of units built by this house.
@@ -848,6 +948,7 @@ class HouseClass {
 
 	private:
 		void Silo_Redraw_Check(long oldtib, long oldcap);
+
 		int AI_Building(void);
 		int AI_Unit(void);
 		int AI_Vessel(void);
@@ -861,7 +962,11 @@ class HouseClass {
 		*/
 		unsigned Allies;
 
-		/*
+
+		// Used to detect if the game is in FFA mode:
+		unsigned int FFAgame = 2; // 2 means not detected yet. 1=FFAgame, 0=No FFAgame
+
+		/*s
 		**	General low-power related damaged is doled out whenever this timer
 		**	expires.
 		*/

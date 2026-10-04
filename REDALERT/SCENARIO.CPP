@@ -765,6 +765,10 @@ void Post_Load_Game(int load_multi)
 void Clear_Scenario(void)
 {
 // TCTCTC -- possibly just use in-place new of scenario object?
+    
+    // Chthon CFE Note: stop chronal vortex so active state isn't inherited by next game, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/acda5f67587b9053b7d49f122cef571304bc3b3a
+    // Probably not applicable to Remaster (suspect dll memory is entirely freed between games), but better safe than sorry 
+    ChronalVortex.Stop();
 
 	Scen.MissionTimer = 0;
 	Scen.MissionTimer.Stop();
@@ -2275,6 +2279,15 @@ bool Read_Scenario_INI(char * fname, bool )
 	Rule.Objects(AftermathINI);
 	Rule.Difficulty(AftermathINI);
 #endif
+	Rule.General(MoreQoLINI);
+	Rule.Recharge(MoreQoLINI);
+	Rule.AI(MoreQoLINI);
+	Rule.Powerups(MoreQoLINI);
+	Rule.Land_Types(MoreQoLINI);
+	Rule.Themes(MoreQoLINI);
+	Rule.IQ(MoreQoLINI);
+	Rule.Objects(MoreQoLINI);
+	Rule.Difficulty(MoreQoLINI);
 
 	/*
 	**	For civilians, remove the graphics name override from the base rules (can still be overridden in scenario-specific INI).
@@ -2658,6 +2671,22 @@ bool Read_Scenario_INI(char * fname, bool )
 		}
 	}
 
+	        
+    // Chthon CFE Note: Since we bugfixed fixed-wing two-shooters with odd max ammo getting an extra shot,
+    // but people are accustomed to MIG getting that extra shot,
+    // add an option to formalize the bugged behavior by increasing max ammo by 1
+    if (Rule.EnableMIGAmmoFudge){
+        AircraftTypeClass& miggy = AircraftTypeClass::As_Reference(AIRCRAFT_MIG);
+        if ((miggy.MaxAmmo % 2 != 0) && miggy.Is_Two_Shooter()){
+            miggy.MaxAmmo++;
+        }
+        AircraftTypeClass& yakky = AircraftTypeClass::As_Reference(AIRCRAFT_YAK);
+        if ((yakky.MaxAmmo % 2 != 0) && yakky.Is_Two_Shooter()){
+            yakky.MaxAmmo++;
+        }
+    }
+	
+	
 	Call_Back();
 
 	/*
@@ -3148,7 +3177,7 @@ static void Create_Units(bool official)
 
 	bool taken[MAX_STORED_WAYPOINTS];
 	CELL waypts[MAX_STORED_WAYPOINTS];
-	assert(Rule.MaxPlayers < ARRAY_SIZE(waypts));
+	assert(Rule.MaxPlayers <= ARRAY_SIZE(waypts));
 	int num_waypts = 0;
 
 	/*

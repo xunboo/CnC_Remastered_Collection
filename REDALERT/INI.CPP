@@ -796,6 +796,9 @@ bool INIClass::Put_Int(char const * section, char const * entry, int number, int
  *                                                                                             *
  *          defvalue -- The default value to use if the specified entry could not be found.    *
  *                                                                                             *
+ *          offset   -- The offset is applied only if a value was read successfully.           *
+ *                      This is to prevent default value stacking of non existing entries.     *
+ *                                                                                             *
  * OUTPUT:  Returns with the integer value specified in the INI database or else returns the   *
  *          default value.                                                                     *
  *                                                                                             *
@@ -804,8 +807,9 @@ bool INIClass::Put_Int(char const * section, char const * entry, int number, int
  * HISTORY:                                                                                    *
  *   07/02/1996 JLB : Created.                                                                 *
  *   07/10/1996 JLB : Handles multiple integer formats.                                        *
+ *   06/20/2020 R-C : Allow to offset integer value.                                           *
  *=============================================================================================*/
-int INIClass::Get_Int(char const * section, char const * entry, int defvalue) const
+int INIClass::Get_Int(char const * section, char const * entry, int defvalue, int offset) const
 {
 	/*
 	**	Verify that the parameters are nominally correct.
@@ -824,6 +828,8 @@ int INIClass::Get_Int(char const * section, char const * entry, int defvalue) co
 				defvalue = atoi(entryptr->Value);
 			}
 		}
+
+		defvalue += offset;
 	}
 	return(defvalue);
 }
@@ -1284,4 +1290,27 @@ void INIClass::Strip_Comments(char * buffer)
 			strtrim(buffer);
 		}
 	}
+}
+
+const char* INIClass::INISectionIterator::operator*()
+{
+	return Base::operator->()->Section;
+}
+
+std::pair<const char*, const char*> INIClass::INIEntryIterator::operator*()
+{
+	const INIEntry* const entry = NodeIterator<const INIEntry>::operator->();
+	return { entry->Entry, entry->Value };
+}
+
+INIClass::INIEntryIterator INIClass::section_begin(const char* section) const
+{
+	const INISection* s = Find_Section(section);
+	return s ? s->EntryList.begin() : INIEntryIterator();
+}
+
+INIClass::INIEntryIterator INIClass::section_end(const char* section) const
+{
+	const INISection* s = Find_Section(section);
+	return s ? s->EntryList.end() : INIEntryIterator();
 }

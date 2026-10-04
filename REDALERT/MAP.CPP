@@ -60,6 +60,7 @@
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 #include "function.h"
+//#include "CFEDEBUG.H"
 
 #define	MCW	MAP_CELL_W
 int const MapClass::RadiusOffset[] = {
@@ -2223,6 +2224,15 @@ void MapClass::Shroud_The_Map(HouseClass *house)
 		CellClass * cellptr = &Map[cell];
 		if (cellptr->Is_Mapped(house) || cellptr->Is_Visible(house)) {
 			
+           // Chthon CFE Note: flip units back to undiscovered
+            ObjectClass* someobj = cellptr->Cell_Occupier();
+            while (someobj != NULL) {
+                if (someobj->Is_Techno() && ((HouseClass*)(((TechnoClass*)someobj)->House) != house) && (!Rule.IsAllyReveal || !((TechnoClass*)someobj)->House->Is_Ally(house) || (someobj->What_Am_I() != RTTI_BUILDING) )){
+                    ((TechnoClass*)someobj)->Set_Undiscovered_By_Player(house);
+                }
+                someobj = someobj->Next;
+            }
+            
 			cellptr->Redraw_Objects();
 			
 			/*
@@ -2239,7 +2249,7 @@ void MapClass::Shroud_The_Map(HouseClass *house)
 	}
 	for (int obj_index = 0; obj_index < DisplayClass::Layer[LAYER_GROUND].Count(); obj_index++) {
 		ObjectClass * layer_object = DisplayClass::Layer[LAYER_GROUND][obj_index];
-		if (layer_object && layer_object->Is_Techno() && ((TechnoClass *)layer_object)->House == house) {
+		if (layer_object && layer_object->Is_Techno() && ((((TechnoClass *)layer_object)->House == house) || (Rule.IsAllyReveal && ((TechnoClass *)layer_object)->House->Is_Ally(house)))) {
 			layer_object->Look();
 		}
 	}
@@ -2292,3 +2302,190 @@ void MapClass::Shroud_The_Map(void)
 	Flag_To_Redraw(true);
 }
 #endif
+
+/***********************************************************************************************
+ * DisplayClass::Scan_For_Overlay -- scans from a cell for a clear path to a specified overlay *
+ *                                                                                             *
+ *    This routine will find the nearest instance of the overlay in the given direction from   *
+ *    the origin. It will abort if it comes across any obstacle.                               *
+ *                                                                                             *
+ * INPUT:   origin  - starting cell                                                            *
+ *          dir     - direction to search in                                                   *
+ *          overlay - overlay to search for                                                    *
+ *          maxLength - length to stop searching at                                            *
+ *                                                                                             *
+ * OUTPUT:  Either the cell with the overlay, or -1 if not found                               *
+ *                                                                                             *
+ * WARNINGS:  none                                                                             *
+ *                                                                                             *
+ * HISTORY:                                                                                    *
+ * 12/06/2020 cfehunter: created
+ *  Chthon modifed to add option to search for only walls belonging to a given house
+ *=============================================================================================*/
+int MapClass::Scan_For_Overlay(const CELL origin, const FacingType dir, const OverlayType overlay, const int maxLength, const bool limittohouse, const HousesType whichhouse) const
+{
+    if (limittohouse && whichhouse == HOUSE_NONE){
+        return -1;
+    }
+    
+    if (In_Radar(origin))
+	{
+		CELL current = origin;
+		for (int i = 0; i < maxLength; ++i)
+		{
+			current = Adjacent_Cell(current, dir);
+			if (In_Radar(current))
+			{
+				const CellClass& mapCell = Map[current];
+
+				//Found a match
+				if (mapCell.Overlay == overlay){
+                    if (!limittohouse || (whichhouse == mapCell.Owner)){
+                        return i;
+                    }
+                    // we hit a wall, but it belongs to someone else
+                    else {
+                        break;
+                    }
+                }
+				//Blocked by an object
+				else if (!Map[current].Is_Clear_To_Build(SPEED_NONE))
+					break;
+			}
+			else
+				break;
+		}
+	}
+
+	return -1;
+}
+
+
+// Chthon CFE Note: Alternative logic for better tiberium growth.
+void MapClass::CFELogic(void){
+    
+    if (Debug_Force_Crash) { *((int *)0) = 1; }
+
+    /*
+	**	Crate regeneration is handled here.
+	*/
+	if (Session.Type != GAME_NORMAL && Session.Options.Goodies) {
+
+		/*
+		**	Find any crate that has expired and then regenerate it at a new
+		**	spot.
+		*/
+		for (int index = 0; index < ARRAY_SIZE(Crates); index++) {
+			if (Crates[index].Is_Expired()) {
+				Crates[index].Remove_It();
+				Place_Random_Crate();
+			}
+		}
+	}
+
+
+	/*
+	**	Bail early if there is no allowed growth or spread of Tiberium.
+	*/
+	if (!Rule.IsTGrowth && !Rule.IsTSpread) return;
+
+	/*
+	**	Scan the whole map in order to accumulate the potential
+	**	Tiberium cells that can grow or spread.
+	*/
+
+    // since CELL is just short int, a static array should probably be faster than a vector
+    // we could make our arrays class members instead, but we'd have to break save/load compatibility since not enough padding
+    // since trees go in the list multiple times, in theory we could go over 16384 (so we need to check for it), but in practice we never should see a map that puts us anywhere close
+    static CELL cangrowlist[MAP_CELL_TOTAL]; //16384
+    static CELL canspreadlist[MAP_CELL_TOTAL];
+    // although it's ugly to leave these arrays dirty, it shouldn't hurt anything
+    // and I'm wary of the performance impact of memsetting 64kb every tick
+    //memset(cangrowlist, 0, MAP_CELL_TOTAL*sizeof(CELL));
+    //memset(canspreadlist, 0, MAP_CELL_TOTAL*sizeof(CELL));
+    int growlistsize = 0;
+    int spreadlistsize = 0;
+
+    int index;
+	for (index = 0; index < MAP_CELL_TOTAL; index++) {
+		CELL cell = index;
+        if (In_Radar(cell)) {
+            CellClass *ptr = &(*this)[cell];
+            if (ptr->Can_Tiberium_Grow()) {
+                cangrowlist[growlistsize] = cell;
+                growlistsize++;
+            }
+            if (ptr->Can_Tiberium_Spread()) {
+                canspreadlist[spreadlistsize] = cell;
+                spreadlistsize++;
+            }
+        }
+    }
+
+    // figure out our growth strength
+    int threshhold = 1;
+    int maxroll = 1;
+    // the old logic would always grow up to MAP_CELL_W/2 cells since every cell that made it into the array got to grow (unlike TD logic)
+    // so odds at this stage should be 1::1 if array wouldn't be overfilled or MAP_CELL_W/2::growlistsize if array would be overfilled
+    if (growlistsize > MAP_CELL_W/2){
+        threshhold = MAP_CELL_W/2;
+        maxroll = growlistsize; 
+    }
+    // sort out the scale factor between multiplayer and mod settings (bigger one wins)
+    int scalefactor = 1;
+    if (Session.Type == GAME_GLYPHX_MULTIPLAYER) {
+		if (Session.Options.Tiberium > 1) {
+			scalefactor = Session.Options.Tiberium;
+		}
+	}		 
+    if (Rule.OreGrowthScale > scalefactor){
+        scalefactor = Rule.OreGrowthScale;
+    }
+    // reduce odds to account for doing a complete scan every tick
+    float multiplier = ((float)(Rule.GrowthRate * TICKS_PER_MINUTE)) / (float)scalefactor;
+    float tempmaxroll = (float)maxroll * multiplier;
+    maxroll = (int)(tempmaxroll + 0.5); // (add 0.5 and cast back to int is poor man's rounding function)
+    maxroll--;
+    
+    //CFE_Debug_Printf("Grow odds are %i in %i (+1) for %i eligible cells", threshhold, maxroll, growlistsize);
+    
+    // grow tiberium
+    for (int i =0; i<growlistsize; i++){
+        // we need to use our modded Random_Pick() function since maxroll can easily exceed the regular function's cap of 32767
+        if (CFE_Patch_FullRange_Random_Pick(0, maxroll) < threshhold){
+            CellClass * newcell = &(*this)[cangrowlist[i]];
+			newcell->Grow_Tiberium();
+        }
+    }
+
+    // figure out our spread strength
+    threshhold = 1;
+    maxroll = 1;
+    // the old logic would always spread from up to MAP_CELL_W/2 cells since that was the size of he array
+    // so odds at this stage should be 1::1 if array wouldn't be overfilled or MAP_CELL_W/2::spreadlistsize if array would be overfilled
+    if (spreadlistsize > MAP_CELL_W/2){
+        threshhold = MAP_CELL_W/2;
+        maxroll = spreadlistsize; 
+    }
+    // scalefactor and multiplier will be the same as above
+    tempmaxroll = (float)maxroll * multiplier;
+    maxroll = (int)(tempmaxroll + 0.5);
+    maxroll--;
+    
+    //CFE_Debug_Printf("Spread odds are %i in %i (+1) for %i eligible cells", threshhold, maxroll, spreadlistsize);
+    
+    // spread tiberium
+    for (int i =0; i<spreadlistsize; i++){
+        // again use the modded random_pick since maxroll may be big
+        if (CFE_Patch_FullRange_Random_Pick(0, maxroll) < threshhold){
+            
+            // this is arguably a bug in the original, since "Map" is an instance of MouseClass, which inherits from this class
+            // if you could somehow have a map not named "Map" (or more than one map), this wouldn't work as intended
+            //Map[canspreadlist[i]].Spread_Tiberium();
+            CellClass * newcell = &(*this)[canspreadlist[i]];
+			newcell->CFESpread_Tiberium(); //use alternate spread function with failover logic
+        }
+    }
+        
+    return;
+}

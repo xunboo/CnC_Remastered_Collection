@@ -79,7 +79,9 @@
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 #include	"function.h"
+#include <algorithm>
 
+//#include "CFEDEBUG.H"
 
 /***********************************************************************************************
  * FootClass::FootClass -- Default constructor for foot class objects.                         *
@@ -113,8 +115,11 @@ FootClass::FootClass(RTTIType rtti, int id, HousesType house) :
 	IsMovingOntoBridge(false),
 	Speed(0),
 	SpeedBias(1),
-	XFormOffset(0x80000000),
-	YFormOffset(0x80000000),
+	// Chthon CFE Note: use as constant as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/b9dd91283bd6e43f85c047a36a49dc2e007f01a1
+	//XFormOffset(0x80000000),
+	//YFormOffset(0x80000000),
+	XFormOffset(INVALID_FORMATION),
+	YFormOffset(INVALID_FORMATION),
 	NavCom(TARGET_NONE),
 	SuspendedNavCom(TARGET_NONE),
 	Team(0),
@@ -131,7 +136,11 @@ FootClass::FootClass(RTTIType rtti, int id, HousesType house) :
 	Path[0] = FACING_NONE;
 	for (int index = 0; index < ARRAY_SIZE(NavQueue); index++) {
 		NavQueue[index] = TARGET_NONE;
+        MemorizedNavQueue[index] = TARGET_NONE;
 	}
+	NavQueueOriginalHead = TARGET_NONE;
+    UnmodifiedNavCom = TARGET_NONE;
+    CFEPatchNavQFlags = 0;
 }
 
 
@@ -492,14 +501,45 @@ int FootClass::Mission_Move(void)
 	assert(IsActive);
 
 	if (!Target_Legal(NavCom) && !IsDriving && MissionQueue == MISSION_NONE) {
-		Enter_Idle_Mode();
+        // Attack Move rework by ChthonVII -- Destination reached, snap out of attack mode
+        // Let's be a little more careful and hopefully avoid units falling out of attack move early
+        // if there's a NavQueue, then we're in Q-attack-move mode, so just skip to enter_idle_mode, which will advance the queue
+        if (AttackMove){
+            // fall out of attack move if we forgot our destination, we arrived (or got close), or don't have a path
+            if (    !Target_Legal(RememberedNavCom) ||
+                    (Distance(RememberedNavCom) < Rule.CloseEnoughDistance) ||
+                    !Find_Path_AStar(nullptr, Coord_Cell(Coord), As_Cell(RememberedNavCom), 1, MOVE_MOVING_BLOCK, -1)
+            ){
+                // if we have things in our move queue, then advance the queue (by entering idle mode), but don't reset attack-mvoe 
+                if  (Target_Legal(NavQueue[0])){
+                    //SkipNavQueueUpdate = false;
+                    Enter_Idle_Mode();
+                }
+                else {
+                    ResetAttackMove(1);
+                    if (!AttackMove){ // if we're a minelayer that stayed in attackmove, then don't go idle!
+                        Enter_Idle_Mode();
+                    }
+                }
+            }
+            // otherwise go back to moving
+            else {
+                AttackMoveEnterMoveMode();
+            }
+        }
+        else {
+            Enter_Idle_Mode();
+        }
+		
 		return(1);
 	}
 //	if (!Target_Legal(TarCom) && !House->IsPlayerControl && !House->IsHuman) {
 	if (!Target_Legal(TarCom) && !House->IsPlayerControl && !House->IsHuman && (!Team.Is_Valid() || !Team->Class->IsSuicide)) {
 		Target_Something_Nearby(THREAT_RANGE);
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_MOVE : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -563,9 +603,18 @@ int FootClass::Mission_Attack(void)
 	if (Target_Legal(TarCom)) {
 		Approach_Target();
 	} else {
-		Enter_Idle_Mode();
+        // Attack Move rework by ChthonVII -- If we're in the middle of an attack-move, then go back to moving instead of going idle
+        if (AttackMove){
+            AttackMoveEnterMoveMode();
+            return(1);
+        }
+        else{
+            Enter_Idle_Mode();
+        }
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_ATTACK : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -600,15 +649,16 @@ int FootClass::Mission_Guard(void)
 	}
 
 	if (!Target_Something_Nearby(THREAT_RANGE)) {
-		Random_Animate();
+        Random_Animate();
 	}
 
-	int dtime = MissionControl[Mission].Normal_Delay();
+	const MissionType dmission = (Mission == MISSION_NONE) ? MISSION_GUARD : Mission;
+	int dtime = MissionControl[dmission].Normal_Delay();
 	if (What_Am_I() == RTTI_VESSEL) {
 		switch (((VesselClass *)this)->Class->Type) {
 			case VESSEL_DD:
 			case VESSEL_PT:
-				dtime = MissionControl[Mission].AA_Delay();
+				dtime = MissionControl[dmission].AA_Delay();
 				break;
 
 			case VESSEL_CA:
@@ -632,7 +682,7 @@ int FootClass::Mission_Guard(void)
 		switch (((InfantryClass *)this)->Class->Type) {
 			case INFANTRY_E1:
 			case INFANTRY_E3:
-				dtime = MissionControl[Mission].AA_Delay();
+				dtime = MissionControl[dmission].AA_Delay();
 				break;
 
 			default:
@@ -708,7 +758,9 @@ int FootClass::Mission_Hunt(void)
 			}
 		}
 	}
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_HUNT : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -1056,7 +1108,8 @@ int FootClass::Mission_Guard_Area(void)
 		Approach_Target();
 	}
 
-	int dtime = MissionControl[Mission].Normal_Delay();
+	const MissionType dmission = (Mission == MISSION_NONE) ? MISSION_GUARD_AREA : Mission;
+	int dtime = MissionControl[dmission].Normal_Delay();
 	if (What_Am_I() == RTTI_AIRCRAFT) {
 		dtime *= 2;
 	}
@@ -1129,11 +1182,11 @@ bool FootClass::Unlimbo(COORDINATE coord, DirType dir)
  * HISTORY:                                                                                    *
  *   12/30/1994 JLB : Created.                                                                 *
  *=============================================================================================*/
-ResultType FootClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced)
+ResultType FootClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced, TARGET indirectsource, ArmorPenType specialarmorpen)
 {
 	assert(IsActive);
 
-	ResultType result = TechnoClass::Take_Damage(damage, distance, warhead, source, forced);
+	ResultType result = TechnoClass::Take_Damage(damage, distance, warhead, source, forced, indirectsource, specialarmorpen);
 
 	if (result != RESULT_NONE && Team) {
 
@@ -1157,7 +1210,11 @@ ResultType FootClass::Take_Damage(int & damage, int distance, WarheadType warhea
 			**	This ensures that if a unit is in sticky mode, then it will snap out of
 			**	it when it takes damage.
 			*/
-			if (source != NULL && MissionControl[Mission].IsNoThreat && !MissionControl[Mission].IsZombie) {
+			if (     (source != NULL) &&
+                      ((Mission != MISSION_NONE) && MissionControl[Mission].IsNoThreat ) && 
+                      //((Mission == MISSION_NONE) || !MissionControl[Mission].IsZombie)
+                      (!MissionControl[Mission].IsZombie)
+            ) {
 				Enter_Idle_Mode();
 			}
 
@@ -1189,7 +1246,7 @@ ResultType FootClass::Take_Damage(int & damage, int distance, WarheadType warhea
 				/*
 				**	If this object isn't doing anything important, then scatter.
 				*/
-				if (MissionControl[Mission].IsScatter && !IsTethered && !IsDriving && !Target_Legal(TarCom) && !Target_Legal(NavCom) && What_Am_I() != RTTI_AIRCRAFT && What_Am_I() != RTTI_VESSEL) {
+				if (((Mission == MISSION_NONE) || MissionControl[Mission].IsScatter) && !IsTethered && !IsDriving && !Target_Legal(TarCom) && !Target_Legal(NavCom) && What_Am_I() != RTTI_AIRCRAFT && What_Am_I() != RTTI_VESSEL) {
 					if (!House->IsHuman || Rule.IsScatter) {
 						Scatter(0, true);
 					}
@@ -1265,6 +1322,7 @@ void FootClass::Active_Click_With(ActionType action, ObjectClass * object)
 			break;
 
 		case ACTION_NOMOVE:
+        case ACTION_ATTACKMOVE: // Attack Move rework by ChthonVII -- fall through into ACTION_MOVE case
 		case ACTION_MOVE:
 			if (Can_Player_Move()) {
 
@@ -1285,7 +1343,13 @@ void FootClass::Active_Click_With(ActionType action, ObjectClass * object)
 #endif
 				}
 
-				Player_Assign_Mission(MISSION_MOVE, TARGET_NONE, targ);
+				// Attack Move rework by ChthonVII -- pass on attack-move if appropriate
+				if (action == ACTION_ATTACKMOVE){
+                    Player_Assign_Mission(MISSION_ATTACKMOVE, TARGET_NONE, targ);
+                }
+                else {
+                    Player_Assign_Mission(MISSION_MOVE, TARGET_NONE, targ);
+                }
 			}
 			break;
 
@@ -1325,7 +1389,8 @@ void FootClass::Active_Click_With(ActionType action, CELL cell)
 		case ACTION_HARVEST:
 			Player_Assign_Mission(MISSION_HARVEST, TARGET_NONE, ::As_Target(cell));
 			break;
-
+        
+        case ACTION_ATTACKMOVE: // Attack Move rework by ChthonVII -- fall through into ACTION_MOVE case
 		case ACTION_MOVE:
 			if (AllowVoice) {
 				COORDINATE coord = Map.Pixel_To_Coord(Get_Mouse_X(), Get_Mouse_Y());
@@ -1358,7 +1423,13 @@ void FootClass::Active_Click_With(ActionType action, CELL cell)
 #endif
 				}
 
-				Player_Assign_Mission(MISSION_MOVE, TARGET_NONE, ::As_Target(cell));
+				// Attack Move rework by ChthonVII -- pass on attack-move if appropriate
+				if (action == ACTION_ATTACKMOVE){
+                    Player_Assign_Mission(MISSION_ATTACKMOVE, TARGET_NONE, ::As_Target(cell));
+                }
+				else {
+                    Player_Assign_Mission(MISSION_MOVE, TARGET_NONE, ::As_Target(cell));
+                }
 			}
 			break;
 
@@ -1466,7 +1537,12 @@ void FootClass::Per_Cell_Process(PCPType why)
 		/*
 		**	Trigger event associated with the player entering the cell.
 		*/
-		if (Cloak != CLOAKED) {
+        // Chthon CFE Note: revise so that units cloaked b/c of veterancy bonus still trip cell triggers
+        // Missions break otherwise
+		//if (Cloak != CLOAKED) {
+		if (  (Cloak != CLOAKED) ||
+                ((VeterancyRank == 3) && (What_Am_I() == RTTI_INFANTRY) && (*((InfantryClass*)this) == INFANTRY_TANYA))
+        ){
 			TriggerClass * trigger = Map[Coord].Trigger;
 			if (trigger != NULL) {
 				trigger->Spring(TEVENT_PLAYER_ENTERED, this, Coord_Cell(Coord));
@@ -1774,7 +1850,8 @@ int FootClass::Mission_Enter(void)
 		}
 	}
 
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_ENTER : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
 
 
@@ -1799,6 +1876,14 @@ void FootClass::Assign_Destination(TARGET target)
 
 	NavCom = target;
 
+    // Chthon CFE Note: helicopters need to this for Q-move input
+    if (JustModifiedNavCom){
+        JustModifiedNavCom = false;
+    }
+    else {
+        UnmodifiedNavCom = target;
+    }
+    
 	/*
 	**	Presume that the easiest path is tried first. As the findpath proceeds, when
 	**	a failure occurs, this threshhold will be increased until path failure
@@ -2085,6 +2170,36 @@ void FootClass::Detach(TARGET target, bool all)
 		}
 	}
 
+	// Chthon CFE Note: also remove as nav queue head
+	if (NavQueueOriginalHead == target){
+        NavQueueOriginalHead = TARGET_NONE;
+    }
+	
+	// copy/pasta to remove from the memorized Nav queue as well
+	loop_count = 0;
+	for (int index = 0; index < ARRAY_SIZE(MemorizedNavQueue); index++) {
+		if (MemorizedNavQueue[index] == target) {
+			MemorizedNavQueue[index] = TARGET_NONE;
+			if (index < ARRAY_SIZE(MemorizedNavQueue)-1) {
+				memmove(&MemorizedNavQueue[index], &MemorizedNavQueue[index+1], ((ARRAY_SIZE(MemorizedNavQueue)-index)-1) * sizeof(MemorizedNavQueue[0]));
+				MemorizedNavQueue[ARRAY_SIZE(MemorizedNavQueue)-1] = TARGET_NONE;
+				index--;
+			}
+		}
+		/*
+		** Extra safety check
+		*/
+		loop_count++;
+		if (loop_count > ARRAY_SIZE(MemorizedNavQueue)) {
+			break;
+		}
+	}
+	
+	if (UnmodifiedNavCom == target){
+        UnmodifiedNavCom = TARGET_NONE;
+    }
+	
+	
 	/*
 	**	If targeting the specified object and this unit is obviously heading
 	**	toward the target to get within range, then abort the path.
@@ -2213,10 +2328,17 @@ void FootClass::Sell_Back(int control)
 	assert(IsActive);
 
 	if (control != 0) {
-		if (House == PlayerPtr) {
-			Speak(VOX_UNIT_SOLD);
-			Sound_Effect(VOC_CASHTURN);
-		}
+        // Chthon CFE Note: fix for MP, play voice for owner, play sound effect positionally for everyone
+		//if (House == PlayerPtr) {
+		//	Speak(VOX_UNIT_SOLD);
+		//	Sound_Effect(VOC_CASHTURN);
+		//}
+        if (House->IsHuman) {
+			Speak(VOX_UNIT_SOLD, House);
+        }
+        CFE_Patch_Sound_Effect_For_Seers(VOC_CASHTURN_CLONE, this);
+		
+        
 		House->Refund_Money(Refund_Amount());
 		Stun();
 		Limbo();
@@ -2305,8 +2427,38 @@ CELL FootClass::Adjust_Dest(CELL cell) const
  *   07/18/1996 JLB : Created.                                                                 *
  *=============================================================================================*/
 void FootClass::Handle_Navigation_List(void)
-{
-	/*
+{    
+    /*
+    if ((What_Am_I() == RTTI_AIRCRAFT) && ((AircraftClass*)this)->Class->IsFixedWing){
+        CFE_Debug_Printf("unit %i is a fixed wing in Handle_Navigation_List(). AttackMove is %i. Target_Legal(RememberedNavCom) is %i. Distance(RememberedNavCom) is %i.  Rule.CloseEnoughDistance is %i. Path is %i", this, AttackMove, Target_Legal(RememberedNavCom), Distance(RememberedNavCom), Rule.CloseEnoughDistance, Find_Path_AStar(nullptr, Coord_Cell(Coord), As_Cell(RememberedNavCom), 1, MOVE_MOVING_BLOCK, -1));
+    }
+    */
+    
+    
+    // Chthon CFE Note: For various reasons related to attack-move, we may want to skip this.
+    if (SkipNavQueueUpdate){
+        return;
+    }
+    // nuclear option to avoid skipping ahead during attack move
+    if (   AttackMove &&
+            Target_Legal(RememberedNavCom) &&
+            (Distance(RememberedNavCom) >= Rule.CloseEnoughDistance) &&
+            (   
+                (What_Am_I() == RTTI_AIRCRAFT) ||
+                (Find_Path_AStar(nullptr, Coord_Cell(Coord), As_Cell(RememberedNavCom), 1, MOVE_MOVING_BLOCK, -1) != 0)
+            ) &&
+            // don't skip if we got here on the very first Q-click setting up path
+            !(
+                    Target_Legal(NavQueue[0]) &&
+                    !Target_Legal(NavQueue[1]) &&
+                    (NavQueue[0] == RememberedNavCom)
+            )
+    ){
+        return;
+    }
+            
+    
+    /*
 	**	The navigation queue only needs to be processed if there is
 	**	currently no navigation target for this object.
 	*/
@@ -2323,6 +2475,10 @@ void FootClass::Handle_Navigation_List(void)
 			memmove(&NavQueue[0], &NavQueue[1], sizeof(NavQueue)-sizeof(NavQueue[0]));
 			NavQueue[ARRAY_SIZE(NavQueue)-1] = TARGET_NONE;
 
+            if (AttackMove){
+                RememberedNavCom = target;
+            }
+            
 			/*
 			**	If the navigation queue is to loop (indefinately), then append the
 			**	target value from the first part to the end of the queue.
@@ -2330,11 +2486,45 @@ void FootClass::Handle_Navigation_List(void)
 			if (IsNavQueueLoop) {
 				for (int index = 0; index < ARRAY_SIZE(NavQueue); index++) {
 					if (NavQueue[index] == TARGET_NONE) {
-						NavQueue[index] = target;
+						// if we've gotten ourselves into a loop with only one cell, then break out
+                        if (index == 0){
+                            IsNavQueueLoop = false;
+                            NavQueueOriginalHead = TARGET_NONE;
+                            //CFE_Debug_Printf("unit %i breaking out of loop mode", this);
+                            // the only way we can get here is double Q-clicking a destination, then not adding anything to the nav queue before the unit arrives there.
+                            // So the destination we just popped will be our current location.
+                            // So trash the destination to avoid issuing a move order with nowhere to go (really fuxxors fixed-wing planes)
+                            Assign_Destination(TARGET_NONE);
+                        }
+                        // otherwise stick whatever we just popped onto the back of the queue
+                        else {
+                            NavQueue[index] = target;
+                        }
 						break;
 					}
 				}
 			}
+			// if we are already somehow occuping the destination cell (b/c pathfinding around traffic jam, or whatever), we'll get stuck
+			// so dequeue again to get a destination that requires movement
+			if (As_Cell(target) == Coord_Cell(Coord)){
+                target = NavQueue[0];
+                if (Target_Legal(target)) {
+                    Assign_Destination(target);
+                    memmove(&NavQueue[0], &NavQueue[1], sizeof(NavQueue)-sizeof(NavQueue[0]));
+                    NavQueue[ARRAY_SIZE(NavQueue)-1] = TARGET_NONE;
+                    if (AttackMove){
+                        RememberedNavCom = target;
+                    }
+                    if (IsNavQueueLoop) {
+                        for (int index = 0; index < ARRAY_SIZE(NavQueue); index++) {
+                            if (NavQueue[index] == TARGET_NONE) {
+                                NavQueue[index] = target;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 		}
 	}
 }
@@ -2362,26 +2552,183 @@ void FootClass::Handle_Navigation_List(void)
  *=============================================================================================*/
 void FootClass::Queue_Navigation_List(TARGET target)
 {
-	if (Target_Legal(target)) {
+	
+    // Chthon CFE Note: This function has been significantly overhauled to make queue loops work correctly.
+    
+    //CFE_Debug_Printf("unit %i entered Queue_Navigation_List()", this);
+    
+    if (Target_Legal(target)) {
 		int count;
+        bool is_loop_request = false;
+        bool original_head_found = false;
+        bool array_has_space = false;
+        int original_head_index = 0;
+        CELL tcell = As_Cell(target);
+        
+        // if the immediate target was just just popped off the queue, count a click here as a loop mode request anyway
+		//if (ActiveCFEPatchConfig.EnableQMoveLoops && ((target == NavCom) || (target == UnmodifiedNavCom))){
+        if (Rule.QmoveLoopsAllowed && ((target == NavCom) || (target == UnmodifiedNavCom))){
+            //CFE_Debug_Printf("unit %i got loop request via navcom match", this);
+            is_loop_request = true;
+        }
+        
 		for (count = 0; count < ARRAY_SIZE(NavQueue); count++) {
-			if (!Target_Legal(NavQueue[count])) break;
+            //CFE_Debug_Printf("unit %i queue[%i] is %i", this, count, NavQueue[count]);
+			if (!Target_Legal(NavQueue[count])){
+                //CFE_Debug_Printf("unit %i array has space", this);
+                array_has_space = true; // we need to distinuish whether the last spot was occupied or not
+                break;
+            }
+            // clicking in a cell that's already in the queue is treated as a request for loop mode
+			//if (tcell == As_Cell(NavQueue[count]) && ActiveCFEPatchConfig.EnableQMoveLoops){
+            if (tcell == As_Cell(NavQueue[count]) && Rule.QmoveLoopsAllowed){
+                //CFE_Debug_Printf("unit %i got loop request via queue match", this);
+                is_loop_request = true;
+            }
+            // find the index for the original destination so we know where to insert if loop mode is already active
+            if (NavQueue[count] == NavQueueOriginalHead){
+                original_head_found = true;
+                original_head_index = count;
+                //CFE_Debug_Printf("unit %i original head is %i in spot [%i]", this, NavQueueOriginalHead, count);
+            }
 		}
 
+		
+		// Disabling "click on the unit itself" / "click on another unit in the same group selection" to request loop mode
+		// Because it is awkward as heck.
+		// But keeping this code around in case I change my mind about it. 
+		
+		//ObjectClass* thatobject = As_Object(target);
+		
 		/*
 		**	If the target is this object itself, then this indicates that the
 		**	queue list is to be processed as a loop. Otherwise, just tack the
 		**	navigation target to the end of the list.
 		*/
-		if (target == As_Target() && count > 0) {
-			IsNavQueueLoop = true;
+        /*
+		//if (target == As_Target() && count > 0) {
+		if (target == As_Target()) {
+			//IsNavQueueLoop = true;
+            is_loop_request = true;
+        // Chthon CFE Note: If the target is another object in the same group selection, also treat as a loop
+        } else if (
+            ActiveCFEPatchConfig.EnableQMoveLoops &&
+            (count > 0) &&
+            thatobject &&
+            thatobject->IsActive &&
+            thatobject->Is_Foot() &&
+            (thatobject->Owner() == Owner()) &&
+            thatobject->Is_Selected_By_Player(House) // assuming it's not possible to issue an unselect after move order but before Queue_Navigation_List() is called
+        ) {
+            is_loop_request = true;
+        }
+        */
+        
+        if (is_loop_request){
+            // if this is a minelayer in attack-move mode, ignore the loop request (otherwise we get stuck going in circles and never drop mines)
+            if (    AttackMove &&
+                    (What_Am_I() == RTTI_UNIT) &&
+                    (*((UnitClass*)this) == UNIT_MINELAYER)
+            ){
+                return;
+            }
+            
+            // never let fixed wing aircraft enter a loop. It allows construction of unlimited aircraft with only one airstrip.
+            /* no longer a problem since the vanilla bug allowing extra planes is fixed.
+            if ((What_Am_I() == RTTI_AIRCRAFT) && ((AircraftClass*)this)->Class->IsFixedWing){
+                return;
+            }
+            */
+            
+            // if this is the first time a loop request was made, we need to put the current destination back at the end of the queue
+            if (!IsNavQueueLoop &&
+                array_has_space &&
+                Target_Legal(NavCom)
+            ){
+                //CFE_Debug_Printf("unit %i setting original head", this);
+                NavQueue[count] = NavCom;
+                NavQueueOriginalHead = NavCom;
+                count++;
+            }
+            // even if the above didn't work, still set IsNavQueueLoop
+            // looping with a slightly broken queue is better than not looping
+            if (count > 0){
+                //CFE_Debug_Printf("unit %i setting loop mode on", this);
+                IsNavQueueLoop = true;
+            }
 		} else {
-			if (count == 0) {
+            // if we are adding the first element to an empty queue, we shouldn't be looping
+            // we also shouldn't be looping if we're a minlayer in q-attack-move mode
+			if (   (count == 0) ||
+                    (
+                        AttackMove &&
+                        (What_Am_I() == RTTI_UNIT) &&
+                        (*((UnitClass*)this) == UNIT_MINELAYER)
+                    )
+            ) {
+                //CFE_Debug_Printf("unit %i setting loop mode off", this);
 				IsNavQueueLoop = false;
+                NavQueueOriginalHead = TARGET_NONE;
 			}
-			if (count < ARRAY_SIZE(NavQueue)) {
-				NavQueue[count] = target;
+			// if there's open space in the array to add something
+			//if (count < ARRAY_SIZE(NavQueue)) {
+			if (array_has_space){
+                // if we're in loop mode and we've got the original head, we need to insert in front of it
+                if (IsNavQueueLoop && original_head_found){
+                    // if the head is at the front of the array, then go in the back
+                    // unless we're adding a second element and the first is the navcom that added via reinserting the original head
+                    if ((original_head_index == 0) && !((NavQueue[0] == NavCom) && (count == 1))){
+                        //CFE_Debug_Printf("unit %i inserting at end b/c head is at front", this);
+                        NavQueue[count] = target;
+                    }
+                    // otherwise shift the head and everything behind it over and insert before the head
+                    else {
+                        //CFE_Debug_Printf("unit %i inserting at %i and shifting stuff backwards", this, original_head_index);
+                        memmove(&NavQueue[original_head_index+1], &NavQueue[original_head_index], sizeof(NavQueue[0]) * (ARRAY_SIZE(NavQueue) - original_head_index - 1) );
+                        NavQueue[original_head_index] = target;
+                    }
+                }
+                // otherwise (not in loop mode) just stick things on the back of the queue
+                else {
+                    //CFE_Debug_Printf("unit %i inserting at end b/c not a loop", this);
+                    NavQueue[count] = target;
+                }
 			}
+			// if there's no empty space, evict the oldest entry. This seems like the least bad thing to do.
+			// gate behind the mod feature so this change to vanilla behavior can be turned off
+			//else if (ActiveCFEPatchConfig.EnableQMoveLoops){
+			else if (Rule.QmoveLoopsAllowed){
+                // if this is a loop, then the original head is the oldest
+                if (IsNavQueueLoop && original_head_found){
+                    NavQueue[original_head_index] = target;
+                    // point the head to the next oldest element
+                    int newheadindex = (original_head_index == ARRAY_SIZE(NavQueue) - 1) ? 0 : original_head_index + 1;
+                    //CFE_Debug_Printf("unit %i has no space -- replacing head at [%i] and setting new head at [%i]", this, original_head_index, newheadindex);
+                    NavQueueOriginalHead = NavQueue[newheadindex];
+                }
+                // otherwise, the element in [0] is the oldest
+                else {
+                    //CFE_Debug_Printf("unit %i has no space -- popping [0] and filling [9]", this);
+                    memmove(&NavQueue[0], &NavQueue[1], sizeof(NavQueue)-sizeof(NavQueue[0]));
+                    NavQueue[ARRAY_SIZE(NavQueue)-1] = target;
+                }
+            }
+            // vanilla behavior was buggy -- count always stopped at 9, so (count < ARRAY_SIZE(NavQueue)) was always true even when [9] was occupied, so [9] got overwritten
+            else {
+                NavQueue[count] = target;
+            }
+            
+            // don't let a Q-attack-move added to an existing loop put a minelayer into Q-attack-move-loop
+            if (    AttackMove &&
+                    IsNavQueueLoop &&
+                    (What_Am_I() == RTTI_UNIT) &&
+                    (*((UnitClass*)this) == UNIT_MINELAYER)
+            ){
+                IsNavQueueLoop = false;
+                NavQueueOriginalHead = TARGET_NONE;
+            }
+            
+            
 		}
 
 		/*
@@ -2392,6 +2739,9 @@ void FootClass::Queue_Navigation_List(TARGET target)
 			Enter_Idle_Mode();
 		}
 	}
+	
+	//CFE_Debug_Printf("unit %i exited Queue_Navigation_List()", this);
+	
 }
 
 
@@ -2414,9 +2764,15 @@ void FootClass::Queue_Navigation_List(TARGET target)
  *=============================================================================================*/
 void FootClass::Clear_Navigation_List(void)
 {
+    //CFE_Debug_Printf("unit %i says: entered clear nav list. IsNavQueueLoop: %i.", this, IsNavQueueLoop);
+    
 	for (int index = 0; index < ARRAY_SIZE(NavQueue); index++) {
 		NavQueue[index] = TARGET_NONE;
 	}
+	IsNavQueueLoop = false;
+    NavQueueOriginalHead = TARGET_NONE;
+    UnmodifiedNavCom = TARGET_NONE;
+    SkipNavQueueUpdate = false;
 }
 
 
@@ -2632,5 +2988,165 @@ int FootClass::Mission_Retreat(void)
 			break;
 	}
 
-	return(MissionControl[Mission].Normal_Delay() + Random_Pick(0, 2));
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_RETREAT : Mission;
+	return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 }
+
+/***********************************************************************************************
+ * FootClass::Find_Docking_Bay -- Searches for a close docking bay.                            *
+ *                                                                                             *
+ *    This routine will be used to find a building that can serve as a docking bay. The        *
+ *    closest building that qualifies will be returned. If no building could be found then     *
+ *    return with NULL. Unlike the version in Techo, this checks if the bay is reachable       *
+ *                                                                                             *
+ * INPUT:   b  -- The structure type to look for.                                              *
+ *                                                                                             *
+ *          friendly -- Allow searching for allied buildings as well.                          *
+ *                                                                                             *
+ * OUTPUT:  Returns with a pointer to the building that can serve as the best docking bay.     *
+ *                                                                                             *
+ * WARNINGS:   This routine might return NULL even if there are buildings of the specified     *
+ *             type available. This is the case when the building(s) are currently busy and    *
+ *             cannot serve as a docking bay at the moment.                                    *
+ *                                                                                             *
+ * HISTORY:                                                                                    *
+ *   13/06/2020 cfehunter : Created.                                                           *
+ *   22/06/2020 cfheunter : Use best by direct distance if no target is pathable               *
+ *=============================================================================================*/
+BuildingClass* FootClass::Find_Docking_Bay(StructType b, bool friendly) const
+{
+	BuildingClass* as_best = nullptr;
+	BuildingClass* direct_best = nullptr;
+	/*
+	**	First check to see if there are ANY buildings of the specified
+	**	type in thi house's inventory. If not, then don't bother to scan
+	**	for one.
+	*/
+	if (House->BScan & (1L << b)) {
+		int as_bestval = (std::numeric_limits<int>::max)();
+		int direct_bestval = (std::numeric_limits<int>::max)();
+
+		const bool is_aircraft = What_Am_I() == RTTI_AIRCRAFT;
+
+		/*
+		**	Loop through all the buildings and find the one that matches the specification
+		**	and is willing to dock with this object.
+		*/
+		for (void* raw_building : Buildings.ActivePointers) {
+			BuildingClass* building = reinterpret_cast<BuildingClass*>(raw_building);
+
+			/*
+			**	Check to see if the building qualifies (preliminary scan).
+			*/
+			if (!building->IsInLimbo &&
+				*building == b &&
+				(friendly ? building->House->Is_Ally(this) : building->House == House) &&
+				const_cast<FootClass&>(*this).TechnoClass::Transmit_Message(RADIO_CAN_LOAD, building) == RADIO_ROGER) {
+
+				/*
+				**	If the building qualifies and this building is better than the
+				**	last qualifying building (as rated by distance), then record
+				**	this building and keep scanning.
+				*/
+				const int direct_distance = Distance(building);
+				const int as_distance = is_aircraft ? direct_distance : Find_Path_AStar(nullptr, Coord_Cell(Coord), building->Nearby_Location(), 1, MOVE_NO, -1);
+				if (direct_distance && (direct_distance < direct_bestval || building->IsLeader)) {
+					direct_best = building;
+					direct_bestval = direct_distance;
+				}
+				if (as_distance && (as_distance < as_bestval || building->IsLeader)) {
+					as_best = building;
+					as_bestval = as_distance;
+				}
+			}
+		}
+	}
+	return as_best ? as_best : direct_best;
+}
+
+
+// save the navigation list so it can be restored later
+void FootClass::Memorize_Navigation_List(){
+    
+    // just return if we aren't doing a Q-attack-move-loop, since that's the only context we want this
+	//if (    !ActiveCFEPatchConfig.EnableAirQAMLRecall ||
+    if (    !Rule.AirQRecallAllowed ||
+             !AttackMove ||
+             !IsNavQueueLoop ||
+             !Target_Legal(NavQueue[0]) ||
+             !Target_Legal(NavQueue[1])
+    ){
+        return;
+    }
+    
+    // save the list (we're assuming both lists are the same size; don't change that!)
+    memcpy(&MemorizedNavQueue[0], &NavQueue[0], sizeof(MemorizedNavQueue));
+    
+    // set a flag
+    HasMemorizedNavQueue = true;
+
+    // roll the list around until the original head is at the front of the list
+    while (MemorizedNavQueue[0] != NavQueueOriginalHead){
+        TARGET target = MemorizedNavQueue[0];
+        memmove(&MemorizedNavQueue[0], &MemorizedNavQueue[1], sizeof(MemorizedNavQueue)-sizeof(MemorizedNavQueue[0]));
+        MemorizedNavQueue[ARRAY_SIZE(MemorizedNavQueue)-1] = TARGET_NONE;
+        for (int index = 0; index < ARRAY_SIZE(MemorizedNavQueue); index++) {
+            if (MemorizedNavQueue[index] == TARGET_NONE) {
+                MemorizedNavQueue[index] = target;
+                break;
+            }
+        }
+    }
+    
+    return;
+}
+
+// copies memorized nav list back and restarts Q-attack-move-loop
+void FootClass::Recall_Navigation_List(){
+    
+    // restore attack-move
+    AttackMove = true;
+    RememberedNavCom = MemorizedNavQueue[0];
+    
+    // restore loop
+    IsNavQueueLoop = true;
+    NavQueueOriginalHead = MemorizedNavQueue[0];
+    
+    // copy the list (we're assuming both lists are the same size; don't change that!)
+    memcpy(&NavQueue[0], &MemorizedNavQueue[0], sizeof(NavQueue));
+    
+    // advance the list one step to put the current destination in the back
+    TARGET target = NavQueue[0];
+    memmove(&NavQueue[0], &NavQueue[1], sizeof(NavQueue)-sizeof(NavQueue[0]));
+    NavQueue[ARRAY_SIZE(NavQueue)-1] = TARGET_NONE;
+    for (int index = 0; index < ARRAY_SIZE(NavQueue); index++) {
+        if (NavQueue[index] == TARGET_NONE) {
+            NavQueue[index] = target;
+            break;
+        }
+    }
+    
+    // clear the old list & flag
+    Clear_Memorized_Navigation_List();
+    
+    // start moving
+    Assign_Target(TARGET_NONE);
+    Assign_Destination(RememberedNavCom);
+    Assign_Mission(MISSION_MOVE);
+    
+    return;
+}
+
+void FootClass::Clear_Memorized_Navigation_List(){
+    
+    // clear the old list
+    for (int index = 0; index < ARRAY_SIZE(MemorizedNavQueue); index++) {
+		MemorizedNavQueue[index] = TARGET_NONE;
+	}
+    
+    // clear the flag
+    HasMemorizedNavQueue = false;
+  
+    return;
+}
+

@@ -77,7 +77,8 @@ char const * RadioClass::Messages[RADIO_COUNT] = {
 	"Circumstances prevent success.",
 	"All done with the request.",
 	"Do you need service depot work?",
-	"Are you sitting on service depot?"
+	"Are you sitting on service depot?",
+	"Scratch that"
 };
 
 

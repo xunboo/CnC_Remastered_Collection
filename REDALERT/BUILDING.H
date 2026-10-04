@@ -195,6 +195,8 @@ class BuildingClass : public TechnoClass
 		*/
 		int LastStrength;
 
+		//By Bast75, this makes the AI to use primary warfactory, and he switches after each tank production.
+		bool AIThisIsPrimaryFactory = false;
 		/*
 		** This is a target id of an animation we're keeping track of.  Examples
 		** of this usage are the advanced tech center, which needs to know
@@ -207,6 +209,25 @@ class BuildingClass : public TechnoClass
 		**	for factory type buildings.
 		*/
 		CDTimerClass<FrameTimerClass> PlacementDelay;
+
+        // Chthon CFE Note: Cannot initialize variables here! RA's savegame loading copies the data then calls new. WTF?!
+        // Do it in the constructor instead.
+        
+		//cfehunter 7th June 2020. Took a lot of digging into the allocation
+		//but it looks like memory is initialised to zeros when allocated from the object pools.
+		//So even though this CELL doesn't exist in older saves, it should be zero initialised.
+		//NOTE: /!\ Stole 2 bytes from the save game padding /!\/
+        //Chthon CFE Note: The TARGET type changed to 4 bytes in RA (see DEFINES.H), so you need to steal 4 bytes of padding, not just 2.
+		TARGET RallyPoint;
+        
+        // Chthon CFE Note: Who created a landmine
+        TARGET WhoLaidMe;
+
+        // Chthon CFE Note: Should I be used as the base to draw inverse wall prview markers? 
+        mutable unsigned char ShowInverseWallPreviewMarkers;
+        
+		TARGET Target_For_Rally_Point(const SpeedType speed = SPEED_TRACK) const;
+
 
 		/*---------------------------------------------------------------------
 		**	Constructors, Destructors, and overloaded operators.
@@ -298,7 +319,7 @@ class BuildingClass : public TechnoClass
 		virtual void Death_Announcement(TechnoClass const * source=0) const;
 		virtual FireErrorType Can_Fire(TARGET, int which) const;
 		virtual TARGET Greatest_Threat(ThreatType threat) const;
-		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false);
+		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false, TARGET indirectsource = TARGET_NONE, ArmorPenType specialarmorpen = ARMORPEN_NONE); // Chthon CFE Note: Added indirectsource so minelayers can get XP
 		virtual bool Captured(HouseClass * newowner);
 		void Update_Radar_Spied(void);
 
@@ -348,12 +369,26 @@ class BuildingClass : public TechnoClass
 
 		virtual unsigned Spied_By() const;
 
+		bool Can_Have_Rally_Point(void) const;
+		virtual void Set_Unselected_By_Player(HouseClass* player = nullptr) override;
+
+		bool Rally_Unit(TechnoClass& unit);
 	private:
 		void Drop_Debris(TARGET source = TARGET_NONE);
+		void Player_Set_Rally_Point(TARGET target);
+
+		bool Unlimbo_Wall(COORDINATE coord);
+		bool Create_Overlay_At(const OverlayTypeClass& oclass, const CELL cell);
 
 		/*
 		** Some additional padding in case we need to add data to the class and maintain backwards compatibility for save/load
 		*/
+        //Chthon CFE Note:
+        // original padding was 32 bytes
+        // Rally Point eats 4  bytes -- The TARGET type changed to 4 bytes in RA (see DEFINES.H), so you need to steal 4 bytes of padding, not just 2. (original padding was 32)
+        // WhoLaidMe eats 4 bytes
+        // Inverse wall preview markers eat 1 byte
+        // RESET PADDING in v1.8 b/c we're breaking save compatibility anyway
 		unsigned char SaveLoadPadding[32];
 
 		static COORDINATE const CenterOffset[BSIZE_COUNT];

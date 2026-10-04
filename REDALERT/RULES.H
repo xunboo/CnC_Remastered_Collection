@@ -75,6 +75,216 @@ class RulesClass {
 		bool Objects(CCINIClass & ini);
 		bool Difficulty(CCINIClass & ini);
 
+
+		//By Bast75
+		bool AIBoostDebug = false;
+		int AIMoreStartingCash = 0;
+		int AIMoreStartingUnits = 0;
+		int AIBoostIQLevel = 3;
+		int AIBoostIQLevelForAllies = 3;
+		bool AIDynamicBoostIQLevelAllowed = true;
+		int AIDynamicBoostIQMax = 5;
+		int AIDynamicBoostIQMin = 2;
+		//int AIBOostIQLevelMCVFallback = 2;
+		int AIStrategyMode = 0;
+		int AIAttackInterval = 5;
+		int AIAttackFirstTime = 5;
+		int AISpeedRush = 0;
+		bool AIAftermathfastbuild = true;
+		bool NoShroud = false;
+		bool AIAllowDynamicBaseGrow = true;
+		int AIAttackMinimaldefenseSendUnitsPrecentageLow = 80;
+		int AIAttackMinimaldefenseSendUnitsPrecentageHigh = 95;
+		int AIAttackMinimaldefenseSendUnitsSwitchLow2High = 4;
+		int AIAttackMinimaldefenseSendUnitsSwitchHigh2All = 8;
+		fixed AIHarvesterMultiplier;
+		int AIHarvesterMemoryValue = 50;
+		int AIHarvesterMaxLimit = 10;
+		int AIHarvesterHuntMadness = 5;
+		int AIBuildingsMultiplier = 2;
+		//int AIUnitMultiplier = 3;
+		int AIMaxEngineers = 20;
+		int InfantryGroupSize = 5;
+		bool AllowTechStealing = true;
+		int AIMaxChronotanks = 5;
+		bool AIAllowChronotanksGroupShifting = true;
+		bool AIAllowLastMCVToDoSecondBase = true;
+		bool AIAllowMoreMCVsToExtraBase = false;
+		int AIMaxMCVOrConYardsInMainBase = 2;
+		int AIMCVWaypointFreeRadius = 20;
+		int AIProductionAggressiveness = 3;
+
+		int AIMadTankSafeToDeployDistance = 22;
+		int AIMadTankCloseEnoughToEnemyDistance = 18;
+		bool AIMadTankWriteDebugInfoToFile = false;
+		bool EngineerInstantCapture = true;
+		bool ChronoKillsCargo = false;
+		int AIHumanGroundWarTankTrigger = 20;
+		int AIVesselMultiLimit = 1;
+		int AIVesselBonus = 5;
+		int AISovietVesselSubPercentage = 50;
+		int AIAlliesVesselPTPercentage = 30;
+		int AIAlliesVesselDDPercentage = 66;
+		int AIPowerPlusMinimal = 50;
+		int AIPowerPlusExtra = 500;
+		int AIPowerPlusSellValue = 1000;
+		int AIRefineryLimitOverwrite = 10; // Never build more Refs as this
+
+		//Basic (Ground war)
+		int AIDogHouseLimitBasic = 2;
+		int AIBarracksLimitBasic = 2;
+		int AIWarFactoryLimitBasic = 2;
+		int AINavalLimitBasic = 2;
+		int AIHelipadAlliedLimitBasic = 2;
+		int AIHelipadSovietLimitBasic = 2;
+		int AIAirstripLimitBasic = 2;
+		int AIAirdefenseLimitBasic = 2;
+		int AIPillBoxLimitBasic = 2;
+		int AICamoPillBoxLimitBasic = 2;
+		int AITurretGunLimitBasic = 2;
+		int AIFlameTurretLimitBasic = 2;
+		int AITeslaLimitBasic = 2;
+		int AIGapLimitBasic = 2;
+		int AINukeLimitBasic = 2;
+		int AIChronosphereLimitBasic = 2;
+		int AIIronCurtainLimitBasic = 2;
+		int AIRepairBayLimitBasic = 2;
+		int AIMaxConYardsAndMCVsBasic = 2;
+		int AIMaxBuildingsBasic = 2;
+		int AIMaxTanksBasic = 2;
+		int AIMaxNavalBasic = 2;
+		int AIMaxInfantryBasic = 2;
+		int AIMaxAirBasic = 2;
+
+		//Mix (Mix of Ground war and Naval war)
+		int AIDogHouseLimitMix = 2;
+		int AIBarracksLimitMix = 2;
+		int AIWarFactoryLimitMix = 2;
+		int AINavalLimitMix = 2;
+		int AIHelipadAlliedLimitMix = 2;
+		int AIHelipadSovietLimitMix = 2;
+		int AIAirstripLimitMix = 2;
+		int AIAirdefenseLimitMix = 2;
+		int AIPillBoxLimitMix = 2;
+		int AICamoPillBoxLimitMix = 2;
+		int AITurretGunLimitMix = 2;
+		int AIFlameTurretLimitMix = 2;
+		int AITeslaLimitMix = 2;
+		int AIGapLimitMix = 2;
+		int AINukeLimitMix = 2;
+		int AIChronosphereLimitMix = 2;
+		int AIIronCurtainLimitMix = 2;
+		int AIRepairBayLimitMix = 2;
+		int AIMaxConYardsAndMCVsMix = 2;
+		int AIMaxBuildingsMix = 2;
+		int AIMaxTanksMix = 2;
+		int AIMaxNavalMix = 2;
+		int AIMaxInfantryMix = 2;
+		int AIMaxAirMix = 2;
+
+		//Naval (No Ground war, Naval war -> more focused on Naval and Air)
+		int AIDogHouseLimitNaval = 2;
+		int AIBarracksLimitNaval = 2;
+		int AIWarFactoryLimitNaval = 2;
+		int AINavalLimitNaval = 2;
+		int AIHelipadAlliedLimitNaval = 2;
+		int AIHelipadSovietLimitNaval = 2;
+		int AIAirstripLimitNaval = 2;
+		int AIAirdefenseLimitNaval = 2;
+		int AIPillBoxLimitNaval = 2;
+		int AICamoPillBoxLimitNaval = 2;
+		int AITurretGunLimitNaval = 2;
+		int AIFlameTurretLimitNaval = 2;
+		int AITeslaLimitNaval = 2;
+		int AIGapLimitNaval = 2;
+		int AINukeLimitNaval = 2;
+		int AIChronosphereLimitNaval = 2;
+		int AIIronCurtainLimitNaval = 2;
+		int AIRepairBayLimitNaval = 2;
+		int AIMaxConYardsAndMCVsNaval = 2;
+		int AIMaxBuildingsNaval = 2;
+		int AIMaxTanksNaval = 2;
+		int AIMaxNavalNaval = 2;
+		int AIMaxInfantryNaval = 2;
+		int AIMaxAirNaval = 2;
+		int AIGroundUnitSlowDown = 98;
+
+		//Speed
+		int AIDogHouseSpeed = 1;
+		int AIBarracksSpeed = 1;
+		int AIWarFactorySpeed = 1;
+		int AINavalSpeed = 1;
+		int AIHelipadSpeed = 4;
+		int AIAirStripSpeed = 5;
+		int AIAirdefenseSpeed = 12;
+		int AIFlameTurretSpeed = 16;
+		int AIGunTeslaSpeed = 16;
+		int AIRepairBaySpeed = 0;
+		int AIGapSpeed = 0;
+		int AINukeSpeed = 1;
+		int AIChronosphereSpeed = 1;
+		int AIIronCurtainSpeed = 1;
+		int AIMaxBuildingsSpeed = 90;
+		int AIMaxTanksSpeed = 100;
+		int AIMaxNavalSpeed = 125;
+		int AIMaxInfantrySpeed = 10;
+		int AIMaxAirSpeed = 100;
+		int AIRefinerySpeed = 1;
+
+		int AStarImpassableCloseEnough = 3;
+		//CFE stuff:
+		int AstarPathFindingEnabled = 1;
+		int	OOM_REPAIR = 1;
+		int	RallyPointsEnabled = 1;
+		int	HarvesterQueueJumpingEnabled = 1;
+		int	HarvesterLoadBalancing = 0;
+		int	HarvesterOptimizeEnabled = 1;
+		int	AttackMoveCommandAllowed = 1;
+		int	ChronoTankAttackMoveCommandAllowed = 1;
+		int	QmoveLoopsAllowed = 1;
+		int	AirQMoveAllowed = 1;
+		int	AirQRecallAllowed = 1;
+		int	SmarterAircraftsEnabled = 1;
+		int	SmarterRepairBaysEnabled = 1;
+		int	BetterOreGrowthEnabled = 1;
+		int	OreIndexBugFixEnabled = 1;
+		int	GemOverLoadFixEnabled = 1;
+		int	EnableInaccuracyBugfix = 1;
+		int	EnableWideSupers = 0;
+		int	EnableQuickSupers = 0;
+		int	EnableSmarterChrono = 0;
+		int	EnableTimeQuakeFix = 0;
+		int	EnableSharedChronoDisasterOdds = 0;
+		int	EnableCumulativeTimelineDamage = 1;
+		int	EnableLongGapFix = 1;
+		int	EnableMIGAmmoFudge = 1;
+		int	EnableBuildingCaptureAnnouncements = 1;
+		int	EnableSmarterSonar = 1;
+		int EnableNewSkirmishAI = 0; //This was not in the ini file, so always disabled. It does something with the sight for the AI, but AI does always see everything.....
+
+		int	EnableVeterancy = 2;
+		int	EnableTanyaGuard = 1;
+		int	SafeSabotage = 1;
+		int	HarvyQueueJumpCutoff = 4;
+		int	HarvyOptimizeUnloadWaitWeight = 6;
+		int	HarvyOptimizeThrashingCutoff = 5;
+		int	HarvyOptimizeThrashingNumerator = 2;
+		int	HarvyOptimizeThrashingDenominator = 3;
+		int HarvyOptimizeThrashingWeight = 4; //This was not in the ini file
+		int	HarvyOptimizeCommunalismNumerator = 9;
+		int	HarvyOptimizeCommunalismDenominator = 4;
+		int HarvyOptimizeCommunalismWeight = 13; //This was not in the ini file
+		int	OreGrowthScale = 1;
+		int	OreToGemPromotionSlowFactor = 8;
+		int	WallBuildLength = 5;
+		int	WallsAlwaysHaveFullCost = 1;
+		int	InverseBuildingPreviewMode = 2;
+		int	BuildingGapOffset = 0;
+		int	OreCapacityOffset = 0;
+		int	SharedChronoDisasterOdds = 20;
+
+
+
 		/*
 		**	This specifies the turbo boost speed for missiles when they are fired upon
 		**	aircraft and the weapon is specified as having a turbo boost bonus.

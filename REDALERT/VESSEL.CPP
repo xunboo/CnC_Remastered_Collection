@@ -64,6 +64,11 @@
 
 #include "function.h"
 
+// Chthon CFE Note -- We need this for checking the shift key for attack-move
+extern bool DLL_Export_Get_Input_Key_State(KeyNumType key);
+
+// and need this so we can play the veteran destroyer's sonar ping sound for a specific player only
+extern void On_Sound_Effect(const HouseClass* player_ptr, int sound_effect_index, const char* extension, int variation, COORDINATE coord);
 
 /***********************************************************************************************
  * VesselClass::VesselClass -- Constructor for vessel class objects.                           *
@@ -120,6 +125,10 @@ VesselClass::VesselClass(VesselType classid, HousesType house) :
 //	if (Session.Type == GAME_INTERNET) {
 //		House->UnitTotals->Increment_Unit_Total((int)classid);
 //	}
+
+    // Chthon CFE Note: Initialize mod stuff
+    BuiltInSonarCountdown = 0;
+
 }
 
 
@@ -591,6 +600,41 @@ void VesselClass::AI(void)
 	assert(Vessels.ID(this) == ID);
 	assert(IsActive);
 
+    // Chthon CFE Note: Rank 3 veteran Destroyers have built-in short range sonar
+    if ((VeterancyRank == 3) && (*this == VESSEL_DD)){
+        if (BuiltInSonarCountdown){
+            BuiltInSonarCountdown--;
+        }
+        else {
+            bool foundone = false;
+            for (int index = 0; index < Vessels.Count(); index++) {
+                VesselClass* sub = Vessels.Ptr(index);
+				if (
+                    ((*sub == VESSEL_SS) || (*sub == VESSEL_MISSILESUB)) &&
+                    !House->Is_Ally(sub) &&
+                    (Lepton_To_Cell(Distance(sub)) <= 10)
+                ){
+						sub->PulseCountDown = 15 * TICKS_PER_SECOND;
+						sub->Do_Uncloak();
+                        foundone = true;
+                }
+            }
+            if (foundone){
+                BuiltInSonarCountdown = 30 * TICKS_PER_SECOND;
+                //Sound_Effect(VOC_SONAR, Coord);
+                //if (House->IsHuman) {
+                //    On_Sound_Effect(House, (int)VOC_SONAR, "", 1, Coord);
+                //}
+                // play for everyone for same reasons big sonar plays for everyone
+                CFE_Patch_Sound_Effect_For_All_Humans(VOC_SONAR, Coord);
+            }
+        }
+    }
+    
+    
+    
+    
+    
 	if (Mission == MISSION_NONE && MissionQueue == MISSION_NONE) {
 		Enter_Idle_Mode();
 	}
@@ -857,7 +901,7 @@ void VesselClass::Active_Click_With(ActionType action, ObjectClass * object)
 		action = What_Action(object);
 		switch (action) {
 			case ACTION_ENTER:
-				action = ACTION_MOVE;
+				action = ACTION_MOVE; //Chthon CFE Note: If we wanted "do attack-move on the way to the repair bay," we'd need to do something here
 				// BRR 10/18/96 IsToSelfRepair = true;
 				break;
 
@@ -940,7 +984,7 @@ void VesselClass::Active_Click_With(ActionType action, CELL cell)
  * HISTORY:                                                                                    *
  *   05/13/1996 JLB : Created.                                                                 *
  *=============================================================================================*/
-ResultType VesselClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced)
+ResultType VesselClass::Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source, bool forced, TARGET indirectsource, ArmorPenType specialarmorpen)
 {
 	assert(Vessels.ID(this) == ID);
 	assert(IsActive);
@@ -951,7 +995,7 @@ ResultType VesselClass::Take_Damage(int & damage, int distance, WarheadType warh
 	**	In order for a this to be damaged, it must either be a unit
 	**	with a crew or a sandworm.
 	*/
-	res = FootClass::Take_Damage(damage, distance, warhead, source, forced);
+	res = FootClass::Take_Damage(damage, distance, warhead, source, forced, indirectsource, specialarmorpen);
 
 	if (res == RESULT_DESTROYED) {
 		Death_Announcement(source);
@@ -977,13 +1021,31 @@ ResultType VesselClass::Take_Damage(int & damage, int distance, WarheadType warh
 		**	Possibly have the crew member run away.
 		*/
 		Mark(MARK_UP);
+        
+        // Chthon CFE Note: Give XP for any passengers killed too
+        // if indirectsource is set, use that; otherwise use source
+        TechnoClass* XPsource;
+        if (Target_Legal(indirectsource)){
+            XPsource = As_Techno(indirectsource);
+        }
+        else {
+            XPsource = source;
+        }
+        
 		while (Is_Something_Attached()) {
 			FootClass * object = Detach_Object();
 
+            // Chthon CFE note copied (likely moot) safety check from UNIT.CPP
+            if (object == NULL) break;		// How can this happen?
+            
 			/*
 			**	Only infantry can run from a destroyed vehicle. Even then, it is not a sure
 			**	thing.
 			*/
+            if (((Rule.EnableVeterancy == 2) || (Rule.EnableVeterancy == 1) && (Session.Type != GAME_NORMAL)) && XPsource && XPsource->IsActive && !House->Is_Ally(XPsource)){
+                XPsource->GainVeterancyXP((object->Strength * object->Class_Of().Cost_Of())/object->Class_Of().MaxStrength);
+            }
+            
 			object->Record_The_Kill(source);
 			delete object;
 		}
@@ -1301,6 +1363,16 @@ TARGET VesselClass::Greatest_Threat(ThreatType threat) const
 		if (*this == VESSEL_CA) {
 			threat = (ThreatType) (threat & (~THREAT_INFANTRY));
 		}
+		
+        //Attack Move rework by ChthonVII -- If we're doing attack-move we probably want to hit buildings
+        if (AttackMove && (*this !=  VESSEL_SS)){
+            threat = threat | THREAT_BUILDINGS;
+            // But don't let cruisers try to hit padless idling helicopters as they bounce up and down -- it won't work
+            if (*this == VESSEL_CA) {
+                threat = (ThreatType) (threat & (~THREAT_AIR));
+            }
+        }
+	
 	}
 #ifdef FIXIT_CARRIER	//	checked - ajw 9/28/98
 	if (*this == VESSEL_CARRIER) {
@@ -1358,7 +1430,12 @@ void VesselClass::Enter_Idle_Mode(bool )
 
 		} else {
 
-			if (Mission == MISSION_GUARD || Mission == MISSION_GUARD_AREA || MissionControl[Mission].IsParalyzed || MissionControl[Mission].IsZombie) {
+			if (    (Mission == MISSION_GUARD) ||
+                    (Mission == MISSION_GUARD_AREA) ||
+                    (   (Mission != MISSION_NONE) &&
+                        ((MissionControl[Mission].IsZombie) || (MissionControl[Mission].IsParalyzed))
+                    )
+            ) {
 				return;
 			}
 
@@ -1888,7 +1965,8 @@ int VesselClass::Mission_Unload(void)
 		default:
 			break;
 	}
-	return(MissionControl[Mission].Normal_Delay());
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_UNLOAD : Mission;
+	return(MissionControl[exitmission].Normal_Delay());
 }
 
 
@@ -2018,7 +2096,8 @@ int VesselClass::Mission_Retreat(void)
 		default:
 			break;
 	}
-	return(MissionControl[Mission].Normal_Delay());
+	const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_RETREAT : Mission;
+	return(MissionControl[exitmission].Normal_Delay());
 }
 
 
@@ -2235,6 +2314,13 @@ ActionType VesselClass::What_Action(CELL cell) const
 	if (action == ACTION_NOMOVE && Class->PrimaryWeapon != NULL && Class->PrimaryWeapon->Bullet->IsSubSurface && Map[cell].Is_Bridge_Here()) {
 		return(ACTION_ATTACK);
 	}
+	
+    // Attack Move rework by ChthonVII -- we need this here so that we can attack-move to cells that the VesselClass-level makes movable (e.g., beaches) 
+	//if (ActiveCFEPatchConfig.EnableAttackMove && action == ACTION_MOVE && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+    if (Rule.AttackMoveCommandAllowed && action == ACTION_MOVE && Is_Owned_By_Player() && Techno_Type_Class()->PrimaryWeapon != NULL && DLL_Export_Get_Input_Key_State(KN_LSHIFT)){
+        action = ACTION_ATTACKMOVE;
+    }
+	
 	return(action);
 }
 

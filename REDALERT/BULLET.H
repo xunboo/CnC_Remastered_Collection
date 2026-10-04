@@ -110,6 +110,11 @@ class BulletClass :	public ObjectClass,
 		virtual void Code_Pointers(void);
 		virtual void Decode_Pointers(void);
 
+        // Chthon CFE Note: version that detaches only the incoming bullets
+        // for use with chronoshift
+        void MinimalDetach(TARGET target);
+        
+        
 		/*
 		**	If this bullet is forced to be inaccurate because of some outside means. A tank
 		**	firing while moving is a good example.
@@ -141,6 +146,14 @@ class BulletClass :	public ObjectClass,
 		*/
 		WarheadType Warhead;
 
+    // Chthon CFE Note: Cannot initialize variables here! RA's savegame loading copies the data then calls new. WTF?!
+    // Do it in the constructor instead.
+        
+    // Chthon CFE Note: Added member to store special per-type armor penetration (used by some rank 3 veteran unit bonuses)
+    public:
+        ArmorPenType SpecialArmorPen;
+    private:
+        
 		/*
 		** Some additional padding in case we need to add data to the class and maintain backwards compatibility for save/load
 		*/

@@ -576,7 +576,12 @@ int AircraftTypeClass::Max_Pips(void) const
 	if (PrimaryWeapon != NULL) {
 		// Camera weapon (ex. on the Spy plane) doesn't display any pips
 		if (!PrimaryWeapon->IsCamera) {
-			return(5);
+			// Chthon CFE Note: As per Vanilla Conquer, fix ammo display so MIG can show 3 ammo pips
+            //return(5);
+            if (MaxAmmo > 5) {
+                return 5;
+            }
+            return MaxAmmo;
 		}
 	}
 	return(Max_Passengers());

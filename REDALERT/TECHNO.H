@@ -243,9 +243,43 @@ class TechnoClass :	public RadioClass,
 		*/
 		unsigned int IsDiscoveredByPlayerMask;
 
+        // Chthon CFE Note: Cannot initialize variables here! RA's savegame loading copies the data then calls new. WTF?!
+        // Do it in the constructor instead.
+        
+        // Attack Move rework by ChthonVII --  Remember the intial destination in case of appearing enemies during an attack move
+		mutable TARGET RememberedNavCom;
+        
+        // Veterancy by ChthonVII
+		unsigned short int VeterancyXP;
+        
+        // Converted most attack-move variables into bit fields to save space, but then ended up removing most of them during attack-move rework
+        // Keep the bitfield arrangment anyway so we can use the space for future mod features.
+		// We need the anonymous union & struct so we can force the zero initialization.
+		// Compatibility note: MSVC is happy with this, but apparently gcc needs extensions for it.
+        // mutable makes them modifiable from inside const functions (the inability to do this greatly complicated Butch's attack move implementation)
+        union{
+			mutable unsigned char CFEPatchFlags;
+			struct{
+				mutable unsigned int AttackMove : 1;
+                mutable unsigned int VeterancyRank : 2;
+                mutable unsigned int ReadyQuadShot : 1;
+                mutable unsigned int VeteranTwoShooter: 1;
+                mutable unsigned int VeteranQuadShooter: 1;
+				mutable unsigned int CFEPatchFlagsPadding : 2; //round out to 1 byte, we can use this space later.
+			};
+		};
+        mutable unsigned char AttackMoveBoatClock; // There is a real-deal timer class available, but I don't want to spend that many bytes for boats.
+        COORDINATE SecondaryElectricZapTarget; // Target coord for chain lightning for rank3 veteran tesla units (COORDINATE type is unsigned long)
+        float LocalROFBias;
+        unsigned int IsKnownToExistByPlayerMask;
+        
 		/*
 		** Some additional padding in case we need to add data to the class and maintain backwards compatibility for save/load
 		*/
+        // Chthon CFE Note: Original padding was 16
+        // Attack Move rework by ChthonVII eats 6 bytes
+        // Veterancy eats 6 bytes (not including CFEPatchFlags since that's counted with attack move, including SecondaryElectricZapTarget)
+        // RESET PADDING in v1.8 b/c we're breaking save compatibility anyway
 		unsigned char SaveLoadPadding[16];
 
 
@@ -334,7 +368,7 @@ class TechnoClass :	public RadioClass,
 		virtual BulletClass * Fire_At(TARGET target, int which=0);
 		virtual int Weapon_Range(int which) const;
 		virtual bool Captured(HouseClass * newowner);
-		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false);
+		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false, TARGET indirectsource = TARGET_NONE, ArmorPenType specialarmorpen = ARMORPEN_NONE); // Chthon CFE Note: Added indirectsource so minelayers can get XP
 		bool Evaluate_Cell(ThreatType method, int mask, CELL cell, int range, TechnoClass const ** object, int & value, int zone=0) const;
 		bool Evaluate_Object(ThreatType method, int mask, int range, TechnoClass const * object, int & value, int zone=-1) const;
 		int Evaluate_Just_Cell(CELL cell) const;
@@ -416,6 +450,20 @@ class TechnoClass :	public RadioClass,
 		**	it renders 45 degree angles.
 		*/
 		static int const BodyShape[32];
+        
+        // Attack Move rework by ChthonVII -- Reset Attack Move parameters, ending attack-move status.
+		void ResetAttackMove(int minelayercommand = 0);
+        void AttackMoveEnterMoveMode();
+        void AttackMoveEnterAttackMode();
+        
+        void GainVeterancyXP(unsigned short int XP);
+        void GainMechanicXPBoost(const int delta);
+        
+        TARGET FindChainLightningTarget(const TARGET primarytarget, const int which, const float rangescalar);
+        
+        void Set_Undiscovered_By_Player(HouseClass *player = NULL);
+        
+        bool Is_Known_To_Exist_By_Player(HouseClass *player = NULL) const;
 };
 
 #endif

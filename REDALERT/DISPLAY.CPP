@@ -88,6 +88,11 @@
 #include	"function.h"
 #include	"vortex.h"
 
+
+// Chthon CFE Note -- externs for inverse building preview
+extern bool Is_Legacy_Render_Enabled(void);
+extern BuildingTypeClass* GetPlacementType(unsigned int index);
+
 /*
 **	These layer control elements are used to group the displayable objects
 **	so that proper overlap can be obtained.
@@ -639,8 +644,15 @@ void DisplayClass::Set_Cursor_Shape(short const * list)
 	if (list) {
 		int	w,h;
 		static short _list[50];
+        const short* src = list;
+        short* dest = _list;
 
-		memcpy(_list, list, sizeof(_list));
+        while (*src != REFRESH_EOL) {
+            *dest++ = *src++;
+        }
+        *dest = REFRESH_EOL;
+
+		//memcpy(_list, list, sizeof(_list));
 		CursorSize = _list;
 		Get_Occupy_Dimensions (w, h, CursorSize);
 		ZoneOffset = -(((h/2)*MAP_CELL_W)+(w/2));
@@ -690,6 +702,7 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 
 	if (house == PlayerPtr->Class->House) {
 		PassedProximity = false;
+        // Chthon CFE Note: Appears to be unused. Otherwise it would be a problem that some branches don't set this correctly...
 	}
 
 	/*
@@ -709,6 +722,26 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 
 	BuildingTypeClass const * building = (BuildingTypeClass const *)object;
 
+    // Chthon CFE Note:
+    // This function is a disaster.
+    // The vanilla behavior is to use a "square" algorithm if gap = 1, or a "circle" algorithm if gap > 1
+    // It's probably a bad thing that this *isn't* consistent with DLLExportClass::Passes_Proximity_Check(), which always uses a square algorithm.
+    // Also, the circle algorithm has problems:
+    // 1. Sometimes it's measuring from the top-left corner rather than the center.
+    // (I'm not clear on whether adding ZoneOffset is what gets you the middle or what gets you the corner,
+    // but this function is gettign called both ways, so one of them will be wrong)
+    // 2. Doesn't account for the diagonal of the building being placed; only the existing building
+    // 3. Doesn't account for bibs either
+    // 4. Using the diagonal is only correct if buildings are placed on a diagonal; subtracts too much if they're straight
+    // 5. (x+y)/2 is a poor estimate of the diagonal
+    // Then Root Core made everything slightly worse by not accounting for adjustments to gap size,
+    // so a different algorithm will be used for the same building depending on the gap offset setting
+    // Plan for fixing this:
+    // 1. Replace the square logic with cfehunter's code from TD so it can handle arbitrary gap size
+    // 2. Add a setting (default on) to just use the square logic for everything
+    // 3. Ignore the problems with the circle logic because they're hard to fix and won't be used unless the setting is toggled
+    
+    
 	/*
 	**	Scan through all cells that the building foundation would cover. If any adjacent
 	**	cells to these are of friendly persuasion, then consider the proximity check to
@@ -717,8 +750,10 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 	ptr = list;
 //	ptr = CursorSize;
 	CELL cell = trycell;
+    bool proximityPass = false;
 //	CELL cell = ZoneCell;
-	if (building->Adjacent == 1) {
+	//if (building->Adjacent == 1) {
+    if (Rule.EnableLongGapFix || (building->Adjacent - Rule.BuildingGapOffset == 1)) {
 		while (*ptr != REFRESH_EOL && (retval == -1) ) {
 			cell = trycell + *ptr++;
 //			cell = ZoneCell + ZoneOffset + *ptr++;
@@ -728,23 +763,30 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 				noradar = true;
 				break;
 			}
-
+			
+			proximityPass = proximityPass || CFE_Patch_Is_Cell_In_Radius_To_Friendly_House(house, cell, building->Adjacent, building->IsWall);
+			
+            /* // Chthon overhaul
 			for (FacingType facing = FACING_FIRST; facing < FACING_COUNT; facing++) {
 				CELL	newcell = Adjacent_Cell(cell, facing);
 
 				if (!In_Radar(newcell)) continue;
-
+                // Chthon CFE Note: The above line is preventing map wrapping because you fail early when the border strip flunks here
+                // If we change this function, need to implement some form of map-wrap prevention
+                
 				// Code has no effect. ST - 8/6/2019 10:51AM
 				//if (!(*this)[newcell].IsMapped) {
 				//	nomapped = true;
 				//}
 				BuildingClass * base = (*this)[newcell].Cell_Building();
-
+                */ // Chthon overhaul
+                
 				/*
 				**	The special cell ownership flag allows building adjacent
 				**	to friendly walls and bibs even though there is no official
 				**	building located there.
 				*/
+                /* // Chthon overhaul
 				//BG: Modified so only walls can be placed next to walls - buildings can't.
 				//JLB: Except for bibs, in which case buildings can be placed next to these.
 				if (building->IsWall ||
@@ -757,16 +799,19 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 				}
 
 				// we've found a building...
-				if (base != NULL && base->House->Class->House == house && base->Class->IsBase) {
+				// Chthon CFE Note: check for active, potential crash bug if we don't
+				if (base != NULL && base->IsActive && base->House->Class->House == house && base->Class->IsBase) {
 					retval = true;
 					break;
 				}
-
+                */ // Chthon overhaul
+				
 				/* BG: modifications to allow buildings one cell away from other buildings.
 				** This is done by scanning each cell that fails the check (hence getting
 				** to this point) and looking at the n/s/e/w adjacent cells to see if they
 				** have buildings in them.  If they do, and they match us, then succeed.
 				*/
+                /* // Chthon overhaul
 				if (retval != -1) break;
 
 				for (FacingType newface = FACING_N; newface < FACING_COUNT; newface++) {
@@ -784,22 +829,40 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 					TechnoClass * newbase = (*this)[newercell].Cell_Techno();
 
 					// we've found a building...
-					if (newbase != NULL && newbase->What_Am_I() == RTTI_BUILDING && newbase->House->Class->House == house && ((BuildingClass const *)newbase)->Class->IsBase) {
+                    // Chthon CFE Note: check for active again
+					if (newbase != NULL && newbase->IsActive && newbase->What_Am_I() == RTTI_BUILDING && newbase->House->Class->House == house && ((BuildingClass const *)newbase)->Class->IsBase) {
 						retval = true;
 						break;
 					}
 				}
 				if (retval != -1) break;
 			}
+			*/ // Chthon overhaul
 		}
 	}
 
-	if (retval == -1) retval = false;
+	//if (retval == -1) retval = false;
+    if (retval == -1) retval = proximityPass;
 
+    
+    // Chthon CFE Note -- make additional check for friendly wall out to max wall length for TS-style wall building
+	// only check if (a) we didn't already succeed, (b) this is a wall, and (c) not HOUSE_NONE
+	if (!retval && !noradar && ((BuildingTypeClass*)object)->IsWall && (house != HOUSE_NONE)){
+        const OverlayType wallOverlay = ((BuildingTypeClass*)object)->Overlay_Type();
+        for (FacingType dir : FacingCardinals){
+            const int scandist = Map.Scan_For_Overlay(trycell, dir, wallOverlay, Rule.WallBuildLength, true, house);
+            if (scandist >= 0){
+                retval = true;
+                break;
+            }
+        }
+    }
+
+    // Chthon CFE Note: not actually used anywhere, so we don't care that this is wrong
 	if (house == PlayerPtr->Class->House) {
 		PassedProximity = (retval != false);
 	}
-
+	
 	/*
 	**	If this object has special dispensation to be placed further than one cell from
 	**	other regular buildings, then check for this case now. Only bother to check if
@@ -808,13 +871,15 @@ bool DisplayClass::Passes_Proximity_Check(ObjectTypeClass const * object, Houses
 	if (!retval && !noradar && object->What_Am_I() == RTTI_BUILDINGTYPE) {
 
 		// For land mines, let's make it check proximity within 10 squares
-		if (building->Adjacent > 1) {
+		//if (building->Adjacent > 1) {
+        if (!Rule.EnableLongGapFix && (building->Adjacent - Rule.BuildingGapOffset > 1)) {
 			for (int index = 0; index < Buildings.Count(); index++) {
 				BuildingClass * obj = Buildings.Ptr(index);
 				if (obj != NULL && !obj->IsInLimbo && obj->House->Class->House == house && obj->Class->IsBase) {
 					int centdist = ::Distance(obj->Center_Coord(), Cell_Coord(cell));
 					centdist /= CELL_LEPTON_W;
-					centdist -= (obj->Class->Width() + obj->Class->Height()) / 2;
+                    // if we wanted to fix the issues noted above, here would be the place to do it
+                    centdist -= (obj->Class->Width() + obj->Class->Height()) / 2;
 					if (centdist <= building->Adjacent) {
 						retval = true;
 						break;
@@ -886,7 +951,8 @@ CELL DisplayClass::Set_Cursor_Pos(CELL pos)
 	** This checks to see if NO animation or drawing is to occur and, if so,
 	**	exits.
 	*/
-	if (pos == ZoneCell) return(pos);
+	// Chthon CFE Note: bugfix magic build exploit, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/422
+    //if (pos == ZoneCell) return(pos);
 
 	prevpos = ZoneCell;
 
@@ -1066,6 +1132,8 @@ void DisplayClass::AI(KeyNumType & input, int x, int y)
 		Get_Mouse_Y() >= (TacPixelY + Lepton_To_Pixel(TacLeptonHeight)))) {
 			Mouse_Left_Release(-1, Get_Mouse_X(), Get_Mouse_Y(), NULL, ACTION_NONE);
 	}
+
+	Update_Placement_Cursor();
 
 	MapClass::AI(input, x, y);
 }
@@ -1709,10 +1777,22 @@ bool DisplayClass::Map_Cell(CELL cell, HouseClass * house, bool check_radar_spie
 #endif
 	}
 
+	// Chthon CFE Note: bugfix. There can be more than one infantry in a cell
+	/*
 	TechnoClass * tech = (*this)[cell].Cell_Techno();
 	if (tech) {
 		tech->Revealed(house);
 	}
+	*/
+    ObjectClass* someobj =  (*this)[cell].Cell_Occupier();
+    while (someobj != NULL) {
+        if (someobj->Is_Techno()){
+            ((TechnoClass*)someobj)->Revealed(house);
+        }
+        someobj = someobj->Next;
+    }
+	
+	
 	return(true);
 }
 
@@ -3137,9 +3217,10 @@ int DisplayClass::TacticalClass::Action(unsigned flags, KeyNumType & key)
 		/*
 		** Cause any displayed cursor to move along with the mouse cursor.
 		*/
-		if (cell != Map.ZoneCell) {
+        // Chthon CFE Note: bugfix magic build exploit, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/422
+		//if (cell != Map.ZoneCell) {
 			Map.Set_Cursor_Pos(cell);
-		}
+		//}
 
 		/*
 		**	Determine the object that the mouse is currently over.
@@ -3675,6 +3756,7 @@ void DisplayClass::Mouse_Left_Up(CELL cell, bool shadow, ObjectClass * object, A
 				Set_Default_Mouse(MOUSE_CAN_SELECT, wsmall);
 				break;
 
+            case ACTION_ATTACKMOVE:  // Attack Move rework by ChthonVII -- fall through to ACTION_MOVE and use the same cursor
 			case ACTION_MOVE:
 				Set_Default_Mouse(MOUSE_CAN_MOVE, wsmall);
 				break;
@@ -3873,7 +3955,8 @@ void DisplayClass::Mouse_Left_Up(CELL cell, bool shadow, ObjectClass * object, A
  *=============================================================================================*/
 void DisplayClass::Mouse_Left_Release(CELL cell, int x, int y, ObjectClass * object, ActionType action, bool wsmall)
 {
-	if (PendingObjectPtr) {
+    
+    if (PendingObjectPtr) {
 		/*
 		**	Try to place the pending object onto the map.
 		*/
@@ -3943,7 +4026,8 @@ void DisplayClass::Mouse_Left_Release(CELL cell, int x, int y, ObjectClass * obj
 				FormSpeed = SPEED_WHEEL;
 				FormMaxSpeed = MPH_LIGHT_SPEED;
 
-				if ( (action == ACTION_MOVE || action == ACTION_NOMOVE) && CurrentObject.Count()) {
+                // Attack Move rework by ChthonVII -- do formation checks for attack-move too
+				if ( (action == ACTION_MOVE || action == ACTION_NOMOVE || action == ACTION_ATTACKMOVE) && CurrentObject.Count()) {
 
 					/*
 					** Scan all units.  If any are selected that shouldn't be, or aren't
@@ -3984,7 +4068,9 @@ void DisplayClass::Mouse_Left_Release(CELL cell, int x, int y, ObjectClass * obj
 						**	formation offset, then it can't be a formation move.
 						*/
 						FootClass const * foot = (FootClass *)tobject;
-						if (foot->Group != group || foot->XFormOffset == 0x80000000) {
+                        // Chthon CFE Note: use as constant as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/b9dd91283bd6e43f85c047a36a49dc2e007f01a1
+						//if (foot->Group != group || foot->XFormOffset == 0x80000000) {
+                        if (foot->Group != group || foot->XFormOffset == INVALID_FORMATION) {
 							FormMove = false;
 							break;
 						}
@@ -4043,7 +4129,7 @@ void DisplayClass::Mouse_Left_Release(CELL cell, int x, int y, ObjectClass * obj
 
 				for (int index = 0; index < CurrentObject.Count(); index++) {
 					ObjectClass * tobject = CurrentObject[index];
-
+                    
 					if (object != NULL) {
 						tobject->Active_Click_With(tobject->What_Action(object), object);
 					} else {
@@ -4056,7 +4142,7 @@ void DisplayClass::Mouse_Left_Release(CELL cell, int x, int y, ObjectClass * obj
 						*/
 						CELL newmove = cell;
 						int whatami = tobject->What_Am_I();
-						if (action == ACTION_MOVE && tobject->Is_Foot()) {
+						if ((action == ACTION_MOVE || action == ACTION_ATTACKMOVE) && tobject->Is_Foot()) {  // Attack Move rework by ChthonVII -- treat attack_move as move for formation purposes
 							int oldisform;
 							FootClass * foot = (FootClass *)tobject;
 							oldisform = foot->IsFormationMove;
@@ -4667,6 +4753,24 @@ void DisplayClass::Shroud_Cell(CELL cell, HouseClass * house)
 		cellptr->Set_Mapped(house, false);
 		cellptr->Set_Visible(house, false);
 		cellptr->Redraw_Objects();
+        
+        // Chthon CFE Note: flip units back to undiscovered
+        ObjectClass* someobj = cellptr->Cell_Occupier();
+        while (someobj != NULL) {
+            if (    someobj->Is_Techno() && 
+                    ((HouseClass*)(((TechnoClass*)someobj)->House) != house) && 
+                    (   !Rule.IsAllyReveal ||
+                            !((TechnoClass*)someobj)->House->Is_Ally(house) ||
+                            (((TechnoClass*)someobj)->What_Am_I() != RTTI_BUILDING)
+                    ) &&
+                    (   !ShareAllyVisibility ||
+                            !((TechnoClass*)someobj)->House->Is_Ally(house)
+                    )
+            ){
+                ((TechnoClass*)someobj)->Set_Undiscovered_By_Player(house);
+            }
+            someobj = someobj->Next;
+        }
 
 		/*
 		**	Check adjacent cells. There might be some weird combination of
@@ -5043,7 +5147,8 @@ static ActionType _priority_actions[] = {
 	ACTION_REPAIR,
 	ACTION_SABOTAGE,
 	ACTION_CAPTURE,
-	ACTION_MOVE
+	ACTION_MOVE,
+    ACTION_ATTACKMOVE  // Attack Move rework by ChthonVII -- probably needs to be in this array. If we wanted to get fancy we could put it above ACTION_MOVE and make a special cursor for it.
 };
 
 static int get_action_priority(ActionType action)
@@ -5137,4 +5242,127 @@ ActionType Best_Object_Action(const ObjectClass* object)
 ActionType Best_Object_Action(CELL cell)
 {
 	return Best_Object_Action(CurrentObject.Raw(), cell);
+}
+
+/***********************************************************************************************
+ * DisplayClass::Update_Placement_Cursor -- per-tick logic for the placement cursor            *
+ *                                                                                             *
+ *    This routine will run any updates for the cursor while in placement mode                 *
+ *                                                                                             *
+ * INPUT:   none                                                                               *
+ *                                                                                             *
+ * OUTPUT:  none                                                                               *
+ *                                                                                             *
+ * WARNINGS:  none                                                                             *
+ *                                                                                             *
+ * HISTORY:                                                                                    *
+ * 12/06/2020 cfehunter: created                                                               *
+ *=============================================================================================*/
+void DisplayClass::Update_Placement_Cursor()
+{
+    // Original TS-style preview
+    // Doesn't work in LAN multiplayer
+    // Absolutely unfixable because clients only send mouse position updates to the server upon click or hotkey
+    // So, while it's possible to draw a preview using the method in the inverted preview (direct calls to DLL_Draw_Intercept()),
+    // it's NOT possible to know WHERE to display it at any given moment.
+	const BuildingTypeClass* const placement_building = PendingObject && PendingObject->What_Am_I() == RTTI_BUILDINGTYPE ? static_cast<const BuildingTypeClass*>(PendingObject) : nullptr;
+	if (placement_building && placement_building->IsWall)
+	{
+		if (CFE_Patch_Should_Extend_Walls() && In_Radar(ZoneCell))
+		{
+			const OverlayType wallOverlay = placement_building->Overlay_Type();
+
+			static short offsetlist[50];
+			static constexpr int MaxOffsets = sizeof(offsetlist) / sizeof(offsetlist[0]) - 1;
+			int offsetslength = 1;
+			offsetlist[0] = 0;
+
+			for (FacingType dir : FacingCardinals)
+			{
+				const int scandist = Scan_For_Overlay(ZoneCell, dir, wallOverlay, Rule.WallBuildLength);
+
+				//Break out if we're going to overflow the buffer
+				if (offsetslength + scandist > MaxOffsets)
+					break;
+
+				CELL current = ZoneCell;
+				for (int i = 0; i < scandist; ++i)
+				{
+					current = Adjacent_Cell(current, dir);
+					offsetlist[offsetslength++] = current - ZoneCell - ZoneOffset;
+				}
+			}
+			offsetlist[offsetslength] = REFRESH_EOL;
+			Set_Cursor_Shape(offsetlist);
+		}
+		else if (CursorSize[1] != REFRESH_EOL) {
+			Set_Cursor_Shape(placement_building->Occupy_List(true));
+		}
+	}
+	
+		// Inverted preview cursor (works in all game modes)
+	// Marks the player's construction yard to redraw and sets a flag to make it draw the inverted placement preview when it does. 
+	// Rule.InverseBuildingPreviewMode: 0=off; 1= only in MP, 2 = always
+	const bool singleplayer = Is_Legacy_Render_Enabled();
+	if (   Rule.InverseBuildingPreviewMode == 2 || 
+            (!singleplayer && (Rule.InverseBuildingPreviewMode == 1))
+    ){
+        
+        int rounds = 1;
+        if (!singleplayer){
+            rounds = Session.Players.Count();
+        }
+	
+        for (int r=0; r<rounds; r++){
+            ObjectTypeClass const * pendingobject = nullptr;
+            HousesType myhousenumber = HOUSE_NONE;
+            if (singleplayer){
+                pendingobject = Map.PendingObject;
+                myhousenumber = PlayerPtr->Class->House;
+            }
+            else {
+                pendingobject = GetPlacementType((unsigned int)r);
+                myhousenumber = Session.Players[r]->Player.ID;
+            }
+        
+            // Now we're going to try finding the Construction Yard for the player building the wall and use *that* as the base object for a bunch of calls to DLL_Draw_Intercept()
+            
+            if (    (myhousenumber != HOUSE_NONE) && 
+                    HouseClass::As_Pointer(myhousenumber)->IsHuman &&
+                    pendingobject &&
+                    CFE_Patch_Is_Wall(*pendingobject)
+            ){
+                // find this player's con yard (if they've got one)
+                bool foundyard = false;
+                for (int i = 0; i < Buildings.Count(); i++) {
+                    BuildingClass* somebuilding = Buildings.Ptr(i);
+                    if (    somebuilding &&
+                            somebuilding->IsActive &&
+                            !somebuilding->IsInLimbo &&
+                            (somebuilding->Owner() == myhousenumber) &&
+                            (*somebuilding == STRUCT_CONST) 
+                    ){
+                        // if they have a pending wall right now, show the markers
+                        if (!foundyard){
+                            somebuilding->ShowInverseWallPreviewMarkers = 2;
+                            somebuilding->Mark(MARK_CHANGE); // force Construction Yard to redraw every tick while wall placement is pending
+                            foundyard = true; //only tag the first con yard found, then clear tags from any others
+                        }
+                        // if the wall placement just ended, mark it to redraw one more time to clear the markers
+                        // ditto if we already tagged a different con yard to draw this frame
+                        else if (somebuilding->ShowInverseWallPreviewMarkers){
+                            somebuilding->ShowInverseWallPreviewMarkers = 0;
+                            somebuilding->Mark(MARK_CHANGE);
+                        }
+
+                    }
+                    
+                }
+            }
+
+                        
+        }
+    }
+	
+	
 }

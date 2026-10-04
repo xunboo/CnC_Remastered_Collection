@@ -198,6 +198,23 @@ WeaponTypeClass * WeaponTypeClass::As_Pointer(WeaponType weapon)
  * HISTORY:                                                                                    *
  *   07/19/1996 JLB : Created.                                                                 *
  *=============================================================================================*/
+//	Validate a type pointer is a live heap member (not just non-NULL) before dereferencing,
+//	to avoid an access violation on a stale/out-of-range pointer during rules load.
+//	Mirrors the helpers added in TECHNO.CPP for TechnoTypeClass::Read_INI.
+static bool Is_Active_Heap_Warhead(WarheadTypeClass const * ptr)
+{
+	if (ptr == NULL) return(false);
+	int id = Warheads.ID(ptr);
+	return(id >= 0 && id < Warheads.Count() && Warheads.Ptr(id) == ptr);
+}
+
+static bool Is_Active_Heap_Bullet(BulletTypeClass const * ptr)
+{
+	if (ptr == NULL) return(false);
+	int id = BulletTypes.ID(ptr);
+	return(id >= 0 && id < BulletTypes.Count() && BulletTypes.Ptr(id) == ptr);
+}
+
 bool WeaponTypeClass::Read_INI(CCINIClass & ini)
 {
 	if (ini.Is_Present(Name())) {
@@ -213,7 +230,7 @@ bool WeaponTypeClass::Read_INI(CCINIClass & ini)
 		IsElectric = ini.Get_Bool(Name(), "Charges", IsElectric);
 		IsTurboBoosted = ini.Get_Bool(Name(), "TurboBoost", IsTurboBoosted);
 
-		WarheadType wtype = (WarheadPtr != NULL) ? WarheadType(WarheadPtr->ID) : WARHEAD_NONE;
+		WarheadType wtype = Is_Active_Heap_Warhead(WarheadPtr) ? WarheadType(WarheadPtr->ID) : WARHEAD_NONE;
 		wtype = ini.Get_WarheadType(Name(), "Warhead", wtype);
 		if (wtype != WARHEAD_NONE) {
 			WarheadPtr = WarheadTypeClass::As_Pointer(wtype);
@@ -222,7 +239,7 @@ bool WeaponTypeClass::Read_INI(CCINIClass & ini)
 			WarheadPtr = NULL;
 		}
 
-		BulletType btype = (Bullet != NULL) ? BulletType(Bullet->ID) : BULLET_NONE;
+		BulletType btype = Is_Active_Heap_Bullet(Bullet) ? BulletType(Bullet->ID) : BULLET_NONE;
 		btype = ini.Get_BulletType(Name(), "Projectile", btype);
 		if (btype != BULLET_NONE) {
 			Bullet = &BulletTypeClass::As_Reference(btype);

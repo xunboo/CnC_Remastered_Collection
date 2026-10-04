@@ -280,7 +280,13 @@ bool BulletTypeClass::Read_INI(CCINIClass & ini)
 		IsProximityArmed = ini.Get_Bool(Name(), "Proximity", IsProximityArmed);
 		IsFlameEquipped = ini.Get_Bool(Name(), "Animates", IsFlameEquipped);
 		IsFueled = ini.Get_Bool(Name(), "Ranged", IsFueled);
-		IsInaccurate = ini.Get_Bool(Name(), "Inaccuate", IsInaccurate);
+        //Chthon CFE Note: bugfix as per https://ppmforums.com/topic-52395/the-lol-ww-wtf-omg-series/?sid=0615f7e6bbfa6f79d5b8a79981bb3258
+		if (Rule.EnableInaccuracyBugfix){
+            IsInaccurate = ini.Get_Bool(Name(), "Inaccurate", IsInaccurate);
+        }
+        else {
+            IsInaccurate = ini.Get_Bool(Name(), "Inaccuate", IsInaccurate);
+        }
 		IsAntiAircraft = ini.Get_Bool(Name(), "AA", IsAntiAircraft);
 		IsAntiGround = ini.Get_Bool(Name(), "AG", IsAntiGround);
 		IsAntiSub = ini.Get_Bool(Name(), "ASW", IsAntiSub);

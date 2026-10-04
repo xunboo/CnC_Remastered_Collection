@@ -63,7 +63,9 @@
  *   07/29/1996 JLB : Created.                                                                 *
  *=============================================================================================*/
 Buffer::Buffer(void * buffer, long size) :
-	BufferPtr(buffer),
+    // Chthon CFE Note: use char* because void* leads to undefined behavior, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/606
+	//BufferPtr(buffer),
+	BufferPtr((char*)buffer),
 	Size(size),
 	IsAllocated(false)
 {
@@ -81,7 +83,9 @@ Buffer::Buffer(char * buffer, long size) :
 
 // Alternate constructor for void const * pointer.
 Buffer::Buffer(void const * buffer, long size) :
-	BufferPtr((void*)buffer),
+    // Chthon CFE Note: use char* because void* leads to undefined behavior, as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/pull/606
+	//BufferPtr((void*)buffer),
+	BufferPtr((char*)buffer),
 	Size(size),
 	IsAllocated(false)
 {
@@ -159,7 +163,8 @@ Buffer & Buffer::operator = (Buffer const & buffer)
 {
 	if (buffer != this) {
 		if (IsAllocated) {
-			delete [] BufferPtr;
+			//delete [] BufferPtr;
+            delete[] static_cast<char*>(BufferPtr);
 		}
 		IsAllocated = false;
 		BufferPtr = buffer.BufferPtr;
@@ -209,7 +214,8 @@ Buffer::~Buffer(void)
 void Buffer::Reset(void)
 {
 	if (IsAllocated) {
-		delete [] BufferPtr;
+		//delete [] BufferPtr;
+        delete[] static_cast<char*>(BufferPtr);
 	}
 	BufferPtr = NULL;
 	Size = 0;

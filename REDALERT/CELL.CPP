@@ -84,6 +84,8 @@
 */
 #include "SidebarGlyphx.h"
 
+// we need this playing sounds for one speciifc player
+extern void On_Sound_Effect(const HouseClass* player_ptr, int sound_effect_index, const char* extension, int variation, COORDINATE coord);
 
 /***********************************************************************************************
  * CellClass::CellClass -- Constructor for cell objects.                                       *
@@ -1704,6 +1706,13 @@ int CellClass::Reduce_Tiberium(int levels)
 		} else {
 			Overlay = OVERLAY_NONE;
 			reducer = OverlayData;
+            // Chthon CFE Note: Vanilla bugfix. OverlayData is zero-indexed. The spread routine creates ore at OverlayData == 0, and there's a graphic for level 0 ore.
+            // Therefore, removing the 0th level of ore should count as removing 1 level.
+            // Otherwise the harvester gets no value at all from harvesting level 0 cells. See UnitClass::Harvesting()
+			//if (ActiveCFEPatchConfig.OreIndexBugfix){
+            if (Rule.OreIndexBugFixEnabled){
+                reducer++;
+            }
 			OverlayData = 0;
 			Recalc_Attributes();
 		}
@@ -1984,7 +1993,8 @@ int CellClass::Clear_Icon(void) const
  *   01/10/1995 JLB : Created.                                                                 *
  *   08/02/1996 JLB : Added the "nokidding" parameter.                                         *
  *=============================================================================================*/
-void CellClass::Incoming(COORDINATE threat, bool forced, bool nokidding)
+// Chthon CFE Note: altered function to (1) make veteran infantry scatter automatically, and (2) add a mode for making ONLY veteran infantry scatter
+void CellClass::Incoming(COORDINATE threat, bool forced, bool nokidding, bool veteransonly)
 {
 	assert((unsigned)Cell_Number() <= MAP_CELL_TOTAL);
 
@@ -1993,11 +2003,18 @@ void CellClass::Incoming(COORDINATE threat, bool forced, bool nokidding)
 	object = Cell_Occupier();
 	while (object != NULL) {
 
+        bool imavet = ((object->What_Am_I() == RTTI_INFANTRY) && ((TechnoClass *)object)->VeterancyRank > 0);
+        
 		/*
 		**	Special check to make sure that friendly units never scatter.
 		*/
-		if (nokidding || Rule.IsScatter || (object->Is_Techno() && ((TechnoClass *)object)->House->IQ >= Rule.IQScatter)) {
-			object->Scatter(threat, forced, nokidding);
+		if ((nokidding || Rule.IsScatter || (object->Is_Techno() && ((TechnoClass *)object)->House->IQ >= Rule.IQScatter) || imavet) && (!veteransonly || imavet)) {
+            if (object->What_Am_I() == RTTI_INFANTRY) {
+                object->Scatter(threat, forced, (nokidding || imavet));
+            }
+            else {
+                object->Scatter(threat, forced, nokidding);
+            }
 		}
 		object = object->Next;
 	}
@@ -2098,6 +2115,7 @@ long CellClass::Tiberium_Adjust(bool pregame)
 		if (OverlayTypeClass::As_Reference(Overlay).Land == LAND_TIBERIUM) {
 			static int _adj[9] = {0,1,3,4,6,7,8,10,11};
 			static int _adjgem[9] = {0,0,0,1,1,1,2,2,2};
+            static int better_adj[24] = {0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11};
 			int	count = 0;
 
 			/*
@@ -2149,7 +2167,19 @@ long CellClass::Tiberium_Adjust(bool pregame)
 				OverlayData = _adjgem[count];
 				OverlayData = min(OverlayData, 2);
 			} else {
-				OverlayData = _adj[count];
+				//OverlayData = _adj[count];
+				//if (ActiveCFEPatchConfig.OreIndexBugfix){
+                if (Rule.OreIndexBugFixEnabled){
+                    if (count == 0){
+                        OverlayData = better_adj[Random_Pick(0,2)];
+                    }
+                    else {
+                        OverlayData = better_adj[(3*(count-1))+Random_Pick(0,2)];
+                    }
+                }
+                else {
+                    OverlayData = _adj[count];
+                }
 			}
 			return((OverlayData+1) * value);
 		}
@@ -2180,6 +2210,16 @@ extern bool MPSuperWeaponDisable;
 bool CellClass::Goodie_Check(FootClass * object)
 {
 	assert((unsigned)Cell_Number() <= MAP_CELL_TOTAL);
+
+	//No shroud On/Off - Mini Franki
+	if (Rule.NoShroud == 1) {
+		if (object->House->IsHuman) {
+			for (CELL cell = 0; cell < MAP_CELL_TOTAL; cell++) {
+				Map.Map_Cell(cell, object->House);
+			}
+			Map.Flag_To_Redraw(true);
+		}
+	}
 
 	if (object != NULL && Overlay != OVERLAY_NONE && OverlayTypeClass::As_Reference(Overlay).IsCrate) {
 		bool force_mcv = false;
@@ -2411,9 +2451,16 @@ bool CellClass::Goodie_Check(FootClass * object)
 		**	Create the effect requested.
 		*/
 		bool tospeak = false;
+        int speakers = 0; // Chthon CFE Note: for MP fixes
 		switch (powerup) {
 			case CRATE_TIMEQUAKE:
 				TimeQuake = true;
+                // Chthon CFE Note: If timequakes are fixed, make sthis do something
+                if (Rule.EnableTimeQuakeFix){
+                    Scen.Do_BW_Fade();
+                    Sound_Effect(VOC_CHRONO, Cell_Coord());
+                    PendingGlobalTimeQuake = true;
+                }
 				break;
 
 			/*
@@ -2437,6 +2484,7 @@ crate_money:
 				*/
 				if (object->House->IsHuman) {
 					Map.Shroud_The_Map(object->House);
+                    object->House->IsVisionary = false;
 				}
 				break;
 
@@ -2534,16 +2582,27 @@ crate_money:
 			**	Create a squad of miscellaneous composition.
 			*/
 			case CRATE_SQUAD:
-				for (int index = 0; index < 5; index++) {
-					static InfantryType _inf[] = {
-						INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,
-						INFANTRY_E2,
-						INFANTRY_E3,
-						INFANTRY_RENOVATOR
-					};
-					if (!InfantryTypeClass::As_Reference(_inf[Random_Pick(0, ARRAY_SIZE(_inf)-1)]).Create_And_Place(Cell_Number(), object->Owner())) {
-						if (index == 0) {
-							goto crate_money;
+				//By Bast75, disabled for Engineer (INFANTRY_RENOVATOR)  if EngineerInstantCapture=true, don't make it a group
+				// Also made the groupsize changable
+				for (int index = 0; index < Rule.InfantryGroupSize; index++) {
+					if (Rule.EngineerInstantCapture) {
+						static InfantryType _inf[] = {
+							INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E2,INFANTRY_E3
+						};
+						if (!InfantryTypeClass::As_Reference(_inf[Random_Pick(0, ARRAY_SIZE(_inf)-1)]).Create_And_Place(Cell_Number(), object->Owner())) {
+							if (index == 0) {
+								goto crate_money;
+							}
+						}
+					}
+					else {
+						static InfantryType _inf[] = {
+							INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E1,INFANTRY_E2,INFANTRY_E3,INFANTRY_RENOVATOR
+						};
+						if (!InfantryTypeClass::As_Reference(_inf[Random_Pick(0, ARRAY_SIZE(_inf) - 1)]).Create_And_Place(Cell_Number(), object->Owner())) {
+							if (index == 0) {
+								goto crate_money;
+							}
 						}
 					}
 				}
@@ -2634,9 +2693,15 @@ crate_money:
 			**	All of the player's objects heal up.
 			*/
 			case CRATE_HEAL_BASE:
-				if (object->IsOwnedByPlayer) {
+				// Chthon CFE Note: fixed for MP
+                /*
+                if (object->IsOwnedByPlayer) {
 					Sound_Effect(VOC_HEAL, object->Center_Coord());
 				}
+				*/
+                if (object->House->IsHuman){
+                    On_Sound_Effect(object->House, (int)VOC_HEAL, "", 1, object->Center_Coord());
+                }
 				for (int index = 0; index < Logic.Count(); index++) {
 					ObjectClass * obj = Logic[index];
 
@@ -2670,10 +2735,32 @@ crate_money:
 					if (obj != NULL && obj->Is_Techno() && Distance(Cell_Coord(), obj->Center_Coord()) < Rule.CrateRadius && ((TechnoClass *)obj)->ArmorBias == 1) {
 						fixed val = ((TechnoClass *)obj)->ArmorBias * Inverse(fixed(CrateData[powerup], 256));
 						((TechnoClass *)obj)->ArmorBias = val;
-						if (obj->Owner() == PlayerPtr->Class->House) tospeak = true;
+						// Chthon CFE Note: fix for MP
+                        if (Session.Type == GAME_NORMAL){
+                            if (obj->Owner() == PlayerPtr->Class->House) tospeak = true;
+                        }
+                        else {
+                            if (((TechnoClass *)obj)->House->IsHuman){
+                                tospeak = true;
+                                speakers |= (1L << obj->Owner());
+                            }
+                        }
 					}
 				}
-				if (tospeak) Speak(VOX_UPGRADE_ARMOR);
+				// Chthon CFE note: fix for MP
+				//if (tospeak) Speak(VOX_UPGRADE_ARMOR);
+				if (tospeak){
+                    if (Session.Type == GAME_NORMAL){
+                        Speak(VOX_UPGRADE_ARMOR);
+                    }
+                    else{
+                        for (HousesType i=HOUSE_FIRST; i<HOUSE_COUNT; i++){
+                            if (((1L << i) & speakers) != 0){
+                                Speak(VOX_UPGRADE_ARMOR, HouseClass::As_Pointer(i));
+                            }
+                        }
+                    }
+                }
 				break;
 
 			case CRATE_SPEED:
@@ -2685,10 +2772,32 @@ crate_money:
 
 						fixed val = foot->SpeedBias * fixed(CrateData[powerup], 256);
 						foot->SpeedBias = val;
-						if (foot->IsOwnedByPlayer) tospeak = true;
+                        // Chthon CFE Note: fix for MP
+                        if (Session.Type == GAME_NORMAL){
+                            if (foot->IsOwnedByPlayer) tospeak = true;
+                        }
+                        else {
+                            if (foot->House->IsHuman){
+                                tospeak = true;
+                                speakers |= (1L << foot->Owner());
+                            }
+                        }
 					}
 				}
-				if (tospeak) Speak(VOX_UPGRADE_SPEED);
+				// Chthon CFE note: fix for MP
+				//if (tospeak) Speak(VOX_UPGRADE_SPEED);
+				if (tospeak){
+                    if (Session.Type == GAME_NORMAL){
+                        Speak(VOX_UPGRADE_SPEED);
+                    }
+                    else{
+                        for (HousesType i=HOUSE_FIRST; i<HOUSE_COUNT; i++){
+                            if (((1L << i) & speakers) != 0){
+                                Speak(VOX_UPGRADE_SPEED, HouseClass::As_Pointer(i));
+                            }
+                        }
+                    }
+                }
 				break;
 
 			case CRATE_FIREPOWER:
@@ -2699,10 +2808,32 @@ crate_money:
 
 						fixed val = ((TechnoClass *)obj)->FirepowerBias * fixed(CrateData[powerup], 256);
 						((TechnoClass *)obj)->FirepowerBias = val;
-						if (obj->Owner() == PlayerPtr->Class->House) tospeak = true;
+                        // Chthon CFE Note: fix for MP
+                        if (Session.Type == GAME_NORMAL){
+                            if (obj->Owner() == PlayerPtr->Class->House) tospeak = true;
+                        }
+                        else {
+                            if (((TechnoClass *)obj)->House->IsHuman){
+                                tospeak = true;
+                                speakers |= (1L << obj->Owner());
+                            }
+                        }
 					}
 				}
-				if (tospeak) Speak(VOX_UPGRADE_FIREPOWER);
+				// Chthon CFE note: fix for MP
+				//if (tospeak) Speak(VOX_UPGRADE_FIREPOWER);
+				if (tospeak){
+                    if (Session.Type == GAME_NORMAL){
+                        Speak(VOX_UPGRADE_FIREPOWER);
+                    }
+                    else{
+                        for (HousesType i=HOUSE_FIRST; i<HOUSE_COUNT; i++){
+                            if (((1L << i) & speakers) != 0){
+                                Speak(VOX_UPGRADE_FIREPOWER, HouseClass::As_Pointer(i));
+                            }
+                        }
+                    }
+                }
 				break;
 
 			case CRATE_INVULN:
@@ -3064,7 +3195,10 @@ bool CellClass::Can_Tiberium_Spread(void) const
 
 	if (Land_Type() != LAND_TIBERIUM) return(false);
 
-	if (OverlayData <= 6) return(false);
+	//if (OverlayData <= 6) return(false);
+	//const int spreadthreshhold = ActiveCFEPatchConfig.OreIndexBugfix ? 5 : 6;
+    const int spreadthreshhold = Rule.OreIndexBugFixEnabled ? 5 : 6;
+    if (OverlayData <= spreadthreshhold) return(false);
 
 	if (Overlay != OVERLAY_GOLD1 && Overlay != OVERLAY_GOLD2 && Overlay != OVERLAY_GOLD3 && Overlay != OVERLAY_GOLD4) return(false);
 
@@ -3132,6 +3266,198 @@ bool CellClass::Spread_Tiberium(bool forced)
 }
 
 
+// Chthon CFE Note: Alt version with failovers
+bool CellClass::CFESpread_Tiberium(bool forced)
+{
+	if (!forced) {
+		if (!Can_Tiberium_Spread()) return(false);
+	}
+    CellClass *backupcell = NULL;
+    bool foundbackup = false;
+	FacingType offset = Random_Pick(FACING_N, FACING_NW);
+	for (FacingType index = FACING_N; index < FACING_COUNT; index++) {
+		CellClass *newcell = Adjacent_Cell(index+offset);
+
+        if (newcell != NULL){
+            
+            // added check for mine head to (hopefully) fix issue where ore sometimes spawns over mine head
+            TerrainClass * terrainptr = newcell->Cell_Terrain();
+            if (terrainptr && (*terrainptr == TERRAIN_MINE)){
+                continue;
+            }
+        
+            if (newcell->Can_Tiberium_Germinate()) {
+                // original code:
+                // This is probably buggy since the code called by new OverlayClass
+                // first sets OverlayData to 1, then calls Redraw_Objects(),
+                // then calls Tiberium_Adjust(), which sets OverlayData to something else,
+                // and then this function expressly sets OverlayData to 0.
+                // Depending on when the graphics thread comes through, the ore may display above stage 0, then shrink the next time it updates, which is visibly wrong if you happen to be looking at that cell as it happens
+                //new OverlayClass(Random_Pick(OVERLAY_GOLD1, OVERLAY_GOLD4), newcell->Cell_Number());
+                //newcell->OverlayData = 0;
+                
+                // this is probably right -- set OverlayData one time, call RedrawObjects() last
+                newcell->OverlayData = 0;
+                newcell->Overlay = Random_Pick(OVERLAY_GOLD1, OVERLAY_GOLD4);
+                newcell->Recalc_Attributes();
+                newcell->Redraw_Objects();
+                return(true);
+            }
+            else if (!foundbackup && newcell->Can_Tiberium_Grow()) {
+                backupcell = newcell;
+                foundbackup = true;
+            }
+            
+        }
+	}
+	// fall back to making a neighbor grow
+	if (foundbackup){
+        backupcell->Grow_Tiberium();
+        return(true);
+    }
+    // die here if we're a mine head so we don't try to spawn ore there
+    TerrainClass * terrainptr = Cell_Terrain();
+    if (terrainptr && (*terrainptr == TERRAIN_MINE)){
+        return false;
+    }
+    // fall back to growing yourself
+    if (Can_Tiberium_Grow()){
+        Grow_Tiberium();
+        return(true);
+    }
+    // fall back to maybe turning into gems (%1 chance)
+    /*
+    if (Random_Pick(0, 99) < 1){ 
+        
+        OverlayData = Random_Pick(0,2);
+        Overlay = Random_Pick(OVERLAY_GEMS1, OVERLAY_GEMS4);
+        Recalc_Attributes();
+        Redraw_Objects(true);
+        
+        return(true);
+    }
+    */
+    // changed odds so that chance to change * value of change  = 25 credits (see comments in CFEOreMineSpread_Tiberium())
+	//const int bugfixoffset = ActiveCFEPatchConfig.OreIndexBugfix ? 1 : 0;
+    const int bugfixoffset = Rule.OreIndexBugFixEnabled ? 1 : 0;
+    int maxroll = (((((Rule.GemValue * 4 * (3 + (3 * bugfixoffset))) / 3) - (Rule.GoldValue * (11 + bugfixoffset))) * Rule.OreToGemPromotionSlowFactor) / Rule.GoldValue) - 1;
+    if (maxroll < 1){
+        maxroll = 99; // fall back to 1% if gems are worth *less* on average than fully grown ore. (which is the case without OreIndexBugfix)
+    }
+    if (Random_Pick(0, maxroll) < 1){
+        OverlayData = Random_Pick(0,2);
+        Overlay = Random_Pick(OVERLAY_GEMS1, OVERLAY_GEMS4);
+        Recalc_Attributes();
+        Redraw_Objects(true);
+        return true;
+    }
+    
+	
+	return(false);
+}
+
+// Chthon CFE Note: special version for ore mines in "better ore growth" mode
+bool CellClass:: CFEOreMineSpread_Tiberium(){
+    CellClass *backupcell = NULL;
+    CellClass *gembackupcell = NULL;
+    bool foundbackup = false;
+    bool foundgembackup = false;
+	FacingType offset = Random_Pick(FACING_N, FACING_NW);
+	for (FacingType index = FACING_N; index < FACING_COUNT; index++) {
+		CellClass *newcell = Adjacent_Cell(index+offset);
+
+        if (newcell != NULL){
+            
+            // added check for mine head to (hopefully) fix issue where ore sometimes spawns over mine head
+            TerrainClass * terrainptr = newcell->Cell_Terrain();
+            if (terrainptr && (*terrainptr == TERRAIN_MINE)){
+                continue;
+            }
+        
+            if (newcell->Can_Tiberium_Germinate()) {
+                
+                // this is probably right -- set OverlayData one time, call RedrawObjects() last
+                newcell->OverlayData = 0;
+                newcell->Overlay = Random_Pick(OVERLAY_GOLD1, OVERLAY_GOLD4);
+                newcell->Recalc_Attributes();
+                newcell->Redraw_Objects();
+                return(true);
+            }
+            else if (!foundbackup && newcell->Can_Tiberium_Grow()) {
+                backupcell = newcell;
+                foundbackup = true;
+            }
+            else if (   !foundgembackup && 
+                            Rule.IsTSpread &&
+                            ((Session.Type == GAME_NORMAL) || Session.Options.Tiberium) &&
+                            (newcell->Land_Type() == LAND_TIBERIUM) && 
+                            (newcell->OverlayData >= 11) &&
+                            (   (Overlay == OVERLAY_GOLD1) ||
+                                (Overlay == OVERLAY_GOLD2) ||
+                                (Overlay == OVERLAY_GOLD3) ||
+                                (Overlay == OVERLAY_GOLD4)
+                            )
+            ){
+                gembackupcell = newcell;
+                foundgembackup = true;
+            }
+        }
+	}
+	// fall back to making a neighbor grow
+	if (foundbackup){
+        backupcell->Grow_Tiberium();
+        return(true);
+    }
+    // fall back to maybe promoting a neighbor to gems (1% chance)
+    // Thought: Maybe instead of 1%, this should be based on adding the same value on average of 1 level of ore
+    // 1 level of ore is 25 credits. After fixing the zero-index bug, max cell value is 300.
+    // 1 level of gems is worth 50, but with 3 extra bails if the harv has space, so effectively 200. So cell values are 200, 400, 600
+    // Let's remove level gems 0 as a possiblity, since it's worth less than level 11 ore.
+    // So 50/50 for +100 or +300, average is +200. Which is 8x the 25 credits we meant to add, so should be 1/8 odds.
+    // If that happens too much, then lock level at 2 and 1/12 odds? Yeah, let's do that.
+    // Two problems with the above: (1) gems look to uniformwithout the samll ones, (2) way too many gems.
+    // So added a fudge factor to slow it down, and used odds for average case and then picked 0-2 gem level.
+    if (foundgembackup){
+		//const int bugfixoffset = ActiveCFEPatchConfig.OreIndexBugfix ? 1 : 0;
+        const int bugfixoffset = Rule.OreIndexBugFixEnabled ? 1 : 0;
+        int maxroll = (((((Rule.GemValue * 4 * (3 + (3 * bugfixoffset))) / 3) - (Rule.GoldValue * (11 + bugfixoffset))) * Rule.OreToGemPromotionSlowFactor) / Rule.GoldValue) - 1;
+        if (maxroll < 1){
+            maxroll = 99; // fall back to 1% if gems are worth *less* on average than fully grown ore. (which is the case without OreIndexBugfix)
+        }
+        if (Random_Pick(0, maxroll) < 1){
+            gembackupcell->OverlayData = Random_Pick(0,2);
+            gembackupcell->Overlay = Random_Pick(OVERLAY_GEMS1, OVERLAY_GEMS4);
+            gembackupcell->Recalc_Attributes();
+            gembackupcell->Redraw_Objects(true);
+            return true;
+        }
+    }
+    // fall back to maybe spawning some ants for the hell of it
+    /*
+    // Unfortunately, the ants show up immobile and invincible
+    // Guessing RA isn't initializing HOUSE_JP in all (any?) game modes (also tried HOUSE_NEUTRAL and it didn't work in skirmish)
+    // Maybe try to figure this out someday
+    if (Random_Pick(0, 99) < 100){ // TODO: revert to1 after testing
+        int antmax = Random_Pick(1, 3) + Random_Pick(0, 2);
+        bool antspawned = false;
+        for (int i=0; i<antmax; i++){
+            UnitClass * unit = new UnitClass(Random_Pick(UNIT_ANT1, UNIT_ANT3), HOUSE_JP);
+            if (unit) {
+                if (Scan_Place_Object(unit, Cell_Number())){
+                    antspawned = true;
+                }
+                else {
+                    delete unit;
+                }
+            }
+        }
+        return antspawned;
+    }
+    */
+    return false;
+}
+
+
 /***********************************************************************************************
  * CellClass::Can_Tiberium_Germinate -- Determines if Tiberium can begin growth in the cell.   *
  *                                                                                             *
@@ -3164,6 +3490,10 @@ bool CellClass::Can_Tiberium_Germinate(void) const
 
 	if (Overlay != OVERLAY_NONE) return(false);
 
+    // Chthon CFE Note: Don't spawn ore over a mine head!
+    TerrainClass * terrainptr = Cell_Terrain();
+    if (terrainptr && (*terrainptr == TERRAIN_MINE)) return false;
+    
 	return(true);
 }
 
@@ -3328,4 +3658,22 @@ bool CellClass::Is_Jamming(HouseClass *player) const
 void CellClass::Override_Land_Type(LandType type)
 {
 	OverrideLand = type;
+}
+
+
+// harvester dumps ore into the cell (to make room for gems)
+bool CellClass::DumpOreHere(){
+    if (Can_Tiberium_Germinate()){
+        OverlayData = 0;
+        Overlay = Random_Pick(OVERLAY_GOLD1, OVERLAY_GOLD4);
+        Recalc_Attributes();
+        Redraw_Objects();
+        return true;
+    }
+    else if (Can_Tiberium_Grow()){
+        Grow_Tiberium();
+        return true;
+    }
+    
+    return false;
 }

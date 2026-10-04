@@ -28,6 +28,7 @@
 #ifdef _WIN32
 #define COM_NO_WINDOWS_H
 #include <objbase.h>
+#include <mmsystem.h>
 #endif
 
 #define _FACDS  0x878

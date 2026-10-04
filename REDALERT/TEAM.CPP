@@ -2495,8 +2495,11 @@ int TeamClass::TMission_Formation(void)
 		case FORMATION_NONE:
 			while (member != NULL) {
 				member->Group = 0xFF;
-				member->XFormOffset = 0x80000000;
-				member->YFormOffset = 0x80000000;
+                // Chthon CFE Note: use as constant as per https://github.com/TheAssemblyArmada/Vanilla-Conquer/commit/b9dd91283bd6e43f85c047a36a49dc2e007f01a1
+				//member->XFormOffset = 0x80000000;
+				//member->YFormOffset = 0x80000000;
+                member->XFormOffset = INVALID_FORMATION;
+				member->YFormOffset = INVALID_FORMATION;
 				member->IsFormationMove = false;
 				member = member->Member;
 			}
@@ -2890,8 +2893,13 @@ int TeamClass::TMission_Invulnerable(void)
 {
 	FootClass * foot = Member;
 	while (foot != NULL) {
-		foot->IronCurtainCountDown = Rule.IronCurtainDuration * TICKS_PER_MINUTE;
-		foot->Mark(MARK_CHANGE);
+        if (Rule.EnableQuickSupers){
+            foot->IronCurtainCountDown = 20 * TICKS_PER_SECOND;
+        }
+        else {
+            foot->IronCurtainCountDown = Rule.IronCurtainDuration * TICKS_PER_MINUTE;
+        }
+        foot->Mark(MARK_CHANGE);
 		foot = foot->Member;
 	}
 	IsNextMission = true;

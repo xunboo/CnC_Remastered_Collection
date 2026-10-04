@@ -109,7 +109,7 @@ class VesselClass : public DriveClass
 		virtual void Assign_Destination(TARGET target);
 		virtual int Pip_Count(void) const;
 
-		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false);
+		virtual ResultType Take_Damage(int & damage, int distance, WarheadType warhead, TechnoClass * source=0, bool forced=false, TARGET indirectsource = TARGET_NONE, ArmorPenType specialarmorpen = ARMORPEN_NONE); // Chthon CFE Note: Added indirectsource so minelayers can get XP
 		virtual FireErrorType Can_Fire(TARGET target, int which) const;
 
 		virtual void Enter_Idle_Mode(bool initial=false);
@@ -145,9 +145,21 @@ class VesselClass : public DriveClass
 		*/
 		FacingClass SecondaryFacing;
 
+        
+    // Chthon CFE Note: additional members added for mod
+    // Chthon CFE Note: Cannot initialize variables here! RA's savegame loading copies the data then calls new. WTF?!
+    // Do it in the constructor instead.
+    public:
+        unsigned short int BuiltInSonarCountdown; // for rank3 veteran destroyer's bult-in sonar
+        
+    protected:
+        
 		/*
 		** Some additional padding in case we need to add data to the class and maintain backwards compatibility for save/load
 		*/
+        // Chthon CFE Note: original padding was 32 bytes
+        // BuiltInSonarCountdown ate 2 bytes
+        // RESET PADDING in v1.8 b/c we're breaking save compatibility anyway
 		unsigned char SaveLoadPadding[32];
 
 };
