@@ -26,7 +26,10 @@ const int MAP_CELL_W=128, MAP_CELL_H=128, MAP_CELL_TOTAL=16384, CELL_LEPTON_W=25
 const int TICKS_PER_SECOND=15, TICKS_PER_MINUTE=900, WAYPT_COUNT=8, REFRESH_EOL=32767;
 const int DIR_S=128, FACING_NW=7, FACING_NONE=-1, MARK_UP=0, MARK_DOWN=1;
 const int UNIT_HTANK=0, UNIT_MTANK=1, UNIT_MTANK2=2, UNIT_LTANK=3, UNIT_MCV=4, UNIT_HARVESTER=5, UNIT_COUNT=6;
-const int STRUCT_CONST=0, STRUCT_REFINERY=1, STRUCT_WEAP=2, STRUCT_POWER=3, STRUCT_REPAIR=4, STRUCT_TURRET=5, STRUCT_COUNT=6, STRUCT_NONE=-1;
+const int STRUCT_CONST=0, STRUCT_REFINERY=1, STRUCT_WEAP=2, STRUCT_POWER=3, STRUCT_REPAIR=4, STRUCT_TURRET=5, STRUCT_KENNEL=6, STRUCT_GAP=7, STRUCT_CHRONOSPHERE=8, STRUCT_IRON_CURTAIN=9,
+    STRUCT_PILLBOX=10, STRUCT_CAMOPILLBOX=11, STRUCT_FLAME_TURRET=12, STRUCT_TESLA=13, STRUCT_ADVANCED_TECH=14,
+    STRUCT_SOVIET_TECH=15, STRUCT_RADAR=16, STRUCT_AIRSTRIP=17, STRUCT_HELIPAD=18, STRUCT_SHIP_YARD=19, STRUCT_SUB_PEN=20,
+    STRUCT_ADVANCED_POWER=21, STRUCT_BARRACKS=22, STRUCT_TENT=23, STRUCT_STORAGE=24, STRUCT_SAM=25, STRUCT_AAGUN=26, STRUCT_COUNT=27, STRUCT_NONE=-1;
 const int UNIT_NONE=-1, INFANTRY_NONE=-1, AIRCRAFT_NONE=-1, VESSEL_NONE=-1;
 const int RTTI_UNIT=1, RTTI_BUILDING=2, RTTI_UNITTYPE=0, RTTI_INFANTRYTYPE=1, RTTI_AIRCRAFTTYPE=2, RTTI_VESSELTYPE=3, RTTI_BUILDINGTYPE=4;
 const int MISSION_NONE=-1, MISSION_GUARD=0, MISSION_HUNT=1, MISSION_UNLOAD=2, MISSION_HARVEST=3;
@@ -35,6 +38,14 @@ const int OVERLAY_NONE=-1, OVERLAY_GOLD1=0, OVERLAY_GOLD2=1, OVERLAY_GOLD3=2, OV
 const int OVERLAY_GEMS1=4, OVERLAY_GEMS2=5, OVERLAY_GEMS3=6, OVERLAY_GEMS4=7, OVERLAY_WALL=8;
 const int LAND_CLEAR=0, LAND_TIBERIUM=1;
 const TARGET TARGET_NONE=0;
+typedef int UrgencyType;
+const int URGENCY_NONE=0, URGENCY_LOW=1, URGENCY_MEDIUM=2, URGENCY_HIGH=3, URGENCY_CRITICAL=4;
+#define ARRAY_SIZE(a) (int)(sizeof(a)/sizeof(a[0]))
+struct BuildChoiceClass {
+    int Urgency, Type;
+    BuildChoiceClass(int urgency=URGENCY_NONE,int type=STRUCT_NONE):Urgency(urgency),Type(type) {}
+};
+struct BuildChoicePool { BuildChoiceClass Choice; BuildChoiceClass * Alloc() { return &Choice; } };
 int Frame=0;
 bool NewUnitsEnabled=true;
 struct { int Type=1; } Session;
@@ -51,7 +62,7 @@ TARGET As_Target(CELL c) { return 0x80000000u|(unsigned int)c; }
 CELL As_Cell(TARGET t) { return (int)(t&65535); }
 bool Target_Legal(TARGET t) { return t!=0; }
 
-struct HouseClass;
+class HouseClass;
 struct BuildingClass;
 struct BulletTypeClass { bool IsAntiGround=true; } GroundBullet, AirBullet;
 struct WeaponTypeClass { BulletTypeClass const * Bullet=&GroundBullet; int Attack=40, Range=4*256; } Cannon, AntiAir;
@@ -79,6 +90,7 @@ struct FactoryClass {
 struct BuildingTypeClass : TechnoTypeClass {
     static BuildingTypeClass Types[STRUCT_COUNT];
     short const * ExitList=nullptr;
+    int Capacity=0, Drain=0, Power=0;
     static BuildingTypeClass const & As_Reference(int type) { return Types[type]; }
     short const * Occupy_List(bool=false) const;
     bool Legal_Placement(CELL) const;
@@ -96,14 +108,16 @@ struct TechnoClass {
     int What_Am_I() const { return Kind; }
     TARGET As_Target() const { return Handle; }
 };
-struct HouseClass {
+class HouseClass {
+public:
     struct ClassFixture { int House=0; } OwnClass;
     ClassFixture * Class=&OwnClass;
     bool IsHuman=false, IsActive=true, IsDefeated=false, IsBaseBuilding=true, IsTiberiumShort=false, Allied=false;
     bool AllowExtraBaseAtWaypoint=false;
-    int Power=400, Drain=100, ActLike=0, Money=20000;
+    int Power=400, Drain=100, ActLike=0, Money=20000, ID=0, AIDogKennelLimit=2;
     int AIMaxConYardsAndMCVs=4, AIMaxBuildings=100, AIRefineryLimit=8, AIWarFactoryLimit=4, AIMaxTanksNr=100;
     int HumanBuildingCount=10;
+    long Capacity=0, Tiberium=0;
     int CurBuildings=0, CurUnits=10, CurInfantry=0, CurAircraft=0, AIPersonalStrategyMode=1, BuildUnit=UNIT_NONE;
     int BuildInfantry=INFANTRY_NONE, BuildAircraft=AIRCRAFT_NONE, BuildVessel=VESSEL_NONE, BuildStructure=STRUCT_NONE;
     FactoryClass * Factories[5]={nullptr};
@@ -122,6 +136,24 @@ struct HouseClass {
     int Native_Economic_Priority() {
 #include "expansion_building_priority.inc"
         return TICKS_PER_SECOND;
+    }
+    void AI_Refresh_Economy();
+    bool AI_Economic_Has_Income() const;
+    bool AI_Economic_Kennel_Ready() const;
+    UrgencyType Check_Raise_Money() const;
+    bool AI_Raise_Money(UrgencyType) const;
+    BuildingClass * Find_Building(StructType) const;
+    BuildChoiceClass Native_Kennel_Choice() {
+        BuildingTypeClass const * b=nullptr; BuildChoiceClass * choiceptr=nullptr;
+        BuildChoicePool BuildChoice; int money=Money; bool hasincome=AI_Economic_Has_Income();
+#include "expansion_kennel_choice.inc"
+        return BuildChoice.Choice;
+    }
+    BuildChoiceClass Native_Storage_Choice() {
+        BuildingTypeClass const * b=nullptr; BuildChoiceClass * choiceptr=nullptr;
+        BuildChoicePool BuildChoice; int money=Money; bool hasincome=AI_Economic_Has_Income();
+#include "expansion_storage_choice.inc"
+        return BuildChoice.Choice;
     }
     bool AI_Economic_MCV_Ready();
     int AI_Economic_Reserve() const;
@@ -169,7 +201,8 @@ public:
 typedef DriverFixture DriveClass;
 struct BuildingClass : TechnoClass {
     BuildingTypeClass const * Class=nullptr;
-    int BState=0;
+    int BState=0, Sales=0;
+    void Sell_Back(int) { ++Sales; Mission=MISSION_DECONSTRUCTION; }
     operator int() const { return Class->Type; }
     TechnoTypeClass const * Techno_Type_Class() const override { return Class; }
     COORDINATE Center_Coord() const override { return Cell_Coord(Coord_Cell(Coord)+129); }
@@ -215,6 +248,8 @@ short const * BuildingTypeClass::Occupy_List(bool placement) const {
     if(Type==STRUCT_CONST) return placement?yard_bib:yard;
     if(Type==STRUCT_REFINERY) return placement?proc_bib:proc;
     if(Type==STRUCT_WEAP) return placement?weap_bib:weap;
+    static short silo[]={0,1,REFRESH_EOL};
+    if(Type==STRUCT_STORAGE) return silo;
     return placement?power_bib:power;
 }
 bool BuildingTypeClass::Legal_Placement(CELL cell) const {
@@ -237,6 +272,14 @@ bool MapFixture::Passes_Proximity_Check(BuildingTypeClass const *,int house,shor
     }
     return false;
 }
+struct HousePool { int ID(HouseClass const * house) const { return house->Class->House; } } Houses;
+BuildingClass * HouseClass::Find_Building(StructType type) const {
+    for (auto building:Buildings.Data)
+        if (building->House==this && *building==type && building->Mission!=MISSION_DECONSTRUCTION) return building;
+    return nullptr;
+}
+#include "expansion_money_check.inc"
+#include "expansion_money_sale.inc"
 #include "expansion_controller.inc"
 #include "expansion_unit_methods.inc"
 int TechnoTypeClass::Factory_Bonus(int time,HouseClass const * hptr) const {
@@ -265,7 +308,8 @@ struct World {
         UnitTypeClass::Types[UNIT_HARVESTER].IsToHarvest=true;
         for(int i=0;i<STRUCT_COUNT;++i) { BuildingTypeClass::Types[i]=BuildingTypeClass(); BuildingTypeClass::Types[i].Type=i; }
         BuildingTypeClass::Types[STRUCT_REFINERY].Cost=2000; BuildingTypeClass::Types[STRUCT_WEAP].Cost=2000;
-        BuildingTypeClass::Types[STRUCT_POWER].Cost=300;
+        BuildingTypeClass::Types[STRUCT_POWER].Cost=300; BuildingTypeClass::Types[STRUCT_POWER].Power=100;
+        BuildingTypeClass::Types[STRUCT_STORAGE].Cost=150; BuildingTypeClass::Types[STRUCT_STORAGE].Capacity=500;
         static short weap_exit[]={257,REFRESH_EOL}; BuildingTypeClass::Types[STRUCT_WEAP].ExitList=weap_exit;
         Enemy.OwnClass.House=1; Ally.OwnClass.House=2; Ally.Allied=true; AirBullet.IsAntiGround=false; AntiAir.Bullet=&AirBullet;
     }
@@ -294,6 +338,20 @@ struct World {
     }
 };
 int main() {
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE;
+        w.AI.CurUnits=3; w.AI.AIRefineryLimit=1; w.AI.AIWarFactoryLimit=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"late funded economy fills a second refinery even with a one-refinery strategy limit");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_REPAIR,7,13); Frame=5*TICKS_PER_MINUTE;
+        w.AI.AIMaxConYardsAndMCVs=1;
+        check(w.AI.AI_Economic_MCV_Ready(),"late funded economy can buy a second base capability near a safely served ore field");
+    }
+    {
+        World w; w.Base(); w.AI.Capacity=2000; w.AI.Tiberium=2000;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"full storage prioritizes a funded silo before optional expansion");
+    }
     {
         World w; w.Base(); w.Ore(50,28);
         check(w.AI.AI_Economic_MCV_Ready(),"funded economy plans an MCV for a reachable distant field");
@@ -333,10 +391,9 @@ int main() {
         check(w.AI.AI_Economic_Building()==STRUCT_NONE,"low power defers optional factory and refinery spending");
         w.AI.Power=400; w.AI.UQuantity[UNIT_HARVESTER]=1;
         check(!w.AI.AI_Economic_MCV_Ready(),"one truck does not support optional expansion");
-        w.AI.UQuantity[UNIT_HARVESTER]=2; w.AI.IsTiberiumShort=true;
-        check(!w.AI.AI_Economic_MCV_Ready(),"economic shortage suspends optional expansion");
-        w.AI.IsTiberiumShort=false; w.AI.Forces.Armor=30;
-        check(!w.AI.AI_Economic_MCV_Ready(),"an outmatched army preserves its economy before expanding");
+        w.AI.UQuantity[UNIT_HARVESTER]=2; w.AI.IsTiberiumShort=true; w.AI.Forces.Armor=30;
+        check(w.AI.AI_Economic_MCV_Ready(),"a safe funded ore outpost is not vetoed by distant enemy forces or a stale shortage");
+        check(!w.AI.IsTiberiumShort,"an active reachable ore economy recovers its shortage status");
     }
     {
         World w; w.Base();
@@ -616,6 +673,233 @@ int main() {
         check(w.AI.AI_Economic_Building()==STRUCT_NONE,"factory recovery with no trucks reserves the replacement harvester's purchase");
         w.AI.Money=3400;
         check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"a destroyed factory and harvesting economy can recover at their combined funded price");
+    }
+
+    {
+        World w; w.Base(); w.AI.IsTiberiumShort=true;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"one stale harvester shortage report cannot block funded growth on a rich reachable map");
+        check(!w.AI.IsTiberiumShort,"the house resource scan clears an obsolete shortage report");
+    }
+    {
+        World w; w.Base(); w.AI.IsTiberiumShort=true; w.AI.Money=1000;
+        check(w.AI.Check_Raise_Money()==URGENCY_NONE,"actual emergency-cash check does not sell buildings for a stale shortage while mining continues");
+        w.AI.AI_Refresh_Economy();
+        check(!w.AI.IsTiberiumShort,"low cash does not turn an active ore economy into an exhausted economy");
+        check(w.AI.Native_Kennel_Choice().Type==STRUCT_NONE,"a kennel cannot consume the recovery and tank-production reserve");
+        w.AI.Money=20000;
+        check(w.AI.Native_Kennel_Choice().Type==STRUCT_KENNEL,"a funded established base can build one useful kennel");
+        check(w.AI.Native_Kennel_Choice().Urgency==URGENCY_LOW,"actual kennel build priority follows essential economic and military infrastructure");
+        auto kennel=w.Build(STRUCT_KENNEL,24,12);
+        check(w.AI.Native_Kennel_Choice().Type==STRUCT_NONE,"configured kennel limit two does not cause redundant skirmish kennels");
+        check(w.AI.AI_Raise_Money(URGENCY_LOW) && kennel->Sales==1,"actual emergency sale records the kennel cooldown");
+        --w.AI.BQuantity[STRUCT_KENNEL]; kennel->IsInLimbo=true;
+        check(w.AI.Native_Kennel_Choice().Type==STRUCT_NONE,"even a fully funded AI cannot immediately rebuild a sold kennel");
+        Frame=2*TICKS_PER_MINUTE;
+        check(w.AI.Native_Kennel_Choice().Type==STRUCT_KENNEL,"a healthy economy can reconsider one kennel after the sale cooldown");
+    }
+    {
+        World w; w.Base(false); w.AI.AI_Refresh_Economy();
+        Frame=TICKS_PER_MINUTE; w.AI.AI_Refresh_Economy(); w.AI.Money=1000;
+        check(w.AI.IsTiberiumShort && !w.AI.AI_Economic_Has_Income(),"a continuously exhausted reachable map eventually reports real house-wide shortage");
+        check(w.AI.Check_Raise_Money()==URGENCY_LOW,"the actual emergency-cash check still responds to real exhaustion");
+        w.Ore(20,25); Frame+=10*TICKS_PER_SECOND; w.AI.AI_Refresh_Economy();
+        check(!w.AI.IsTiberiumShort && w.AI.Check_Raise_Money()==URGENCY_NONE,"ore regeneration restores income and ends emergency selling");
+    }
+    {
+        World w; w.Base(false); w.Ore(20,25,0);
+        check(w.AI.AI_Economic_Has_Income(),"one reachable ore cell counts as income without meeting the outpost investment threshold");
+        check(!w.AI.AI_Economic_MCV_Ready(),"a tiny ore deposit still cannot justify a new outpost");
+    }
+    {
+        World w; w.Base(); w.Ore(50,28); w.AI.AIRefineryLimit=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_REPAIR,"a funded safe outpost causes the missing MCV repair-depot prerequisite to be built");
+        BuildingTypeClass::Types[STRUCT_REPAIR].Allowed=false;
+        check(w.AI.AI_Economic_Building()==STRUCT_NONE,"the MCV prerequisite respects the map technology restrictions");
+    }
+    {
+        World w; w.Base(); UnitClass * idle=Units.Data[0]; idle->Mission=MISSION_GUARD;
+        Units.Data[1]->IsInLimbo=true; w.AI.IsTiberiumShort=true; w.AI.AI_Refresh_Economy();
+        check(!w.AI.IsTiberiumShort,"a stranded shortage flag cannot permanently freeze an idle harvester");
+        idle->Mission_Guard();
+        check(idle->MissionQueue==MISSION_HARVEST,"the actual native guard mission resumes the recovered idle harvester");
+    }
+    {
+        World w; w.Base(); w.AI.CurUnits=3; w.AI.AIRefineryLimit=1; w.AI.AIWarFactoryLimit=1;
+        Frame=5*TICKS_PER_MINUTE-1;
+        check(w.AI.AI_Economic_Building()==STRUCT_NONE,"minimum infrastructure does not override early-game strategy limits");
+        Frame+=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"late minimum becomes active exactly at five simulation minutes");
+        w.Build(STRUCT_REFINERY,21,18); w.AI.AIPersonalStrategyMode=4;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"late air strategy still fills the requested second tank factory");
+        w.AI.CurUnits=100; w.AI.AIMaxTanksNr=80;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"a full current army does not remove the late second-factory goal");
+        w.AI.Money=4699;
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"late second factory preserves the continuing tank and military budget");
+        w.AI.Money=4700;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"exact fully reserved funding supports the late second factory");
+        w.Build(STRUCT_WEAP,17,8);
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"two factories stop minimum-driven production capacity growth");
+        w.AI.BQuantity[STRUCT_WEAP]=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"a destroyed second factory is reconsidered on a later decision");
+        w.AI.AIWarFactoryLimit=0;
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"an explicitly disabled factory category remains disabled");
+        w.AI.AIWarFactoryLimit=1; w.AI.AIMaxTanksNr=0;
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"disabled tank production does not buy spare tank capacity");
+    }
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE; w.AI.CurUnits=3;
+        w.AI.AIRefineryLimit=1; w.AI.Money=3899;
+        check(w.AI.AI_Economic_Building()!=STRUCT_REFINERY,"late second refinery keeps the economic and combat reserve");
+        w.AI.Money=3900;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"exact reserved funding buys the late second refinery");
+        w.AI.Money=20000; w.AI.AIRefineryLimit=0;
+        check(w.AI.AI_Economic_Building()!=STRUCT_REFINERY,"an explicitly disabled refinery category remains disabled");
+        w.AI.AIRefineryLimit=1; BuildingTypeClass::Types[STRUCT_REFINERY].Allowed=false;
+        check(w.AI.AI_Economic_Building()!=STRUCT_REFINERY,"late refinery minimum respects scenario technology");
+    }
+    {
+        World w; w.Base(false); w.Ore(20,25,0); Frame=5*TICKS_PER_MINUTE;
+        w.AI.CurUnits=3; w.AI.AIRefineryLimit=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"small reachable income permits a safe base-side minimum refinery");
+        BuildingClass preview; preview.Class=&BuildingTypeClass::Types[STRUCT_REFINERY];
+        check(w.AI.AI_Economic_Location(&preview)!=0,"minimum refinery fallback exposes a legal construction location");
+    }
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE; w.AI.CurUnits=3; w.AI.AIRefineryLimit=1;
+        BuildingTypeClass::Types[STRUCT_REFINERY].Drain=40; w.AI.Power=w.AI.Drain+20;
+        check(w.AI.AI_Economic_Building()==STRUCT_POWER,"minimum infrastructure builds funded power before a future brownout");
+        w.AI.Money=4000;
+        check(w.AI.AI_Economic_Building()!=STRUCT_REFINERY,"insufficient power cannot be bypassed by the minimum refinery goal");
+        w.AI.Power=w.AI.Drain+40;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"exact spare power permits the second refinery");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_REPAIR,7,13); Frame=5*TICKS_PER_MINUTE; w.AI.AIMaxConYardsAndMCVs=1;
+        check(AIExpansion::Base_Limit(&w.AI)==2,"late effective base limit is at least two for an enabled one-base strategy");
+        check(w.AI.AI_Economic_MCV_Ready(),"one existing yard can fund a safely reachable second base");
+        auto mcv=w.Unit(UNIT_MCV,21,15);
+        check(!w.AI.AI_Economic_MCV_Ready(),"one yard and one undeployed MCV already meet the combined goal");
+        mcv->Goto_Clear_Spot(); int goal=Deployments[mcv->As_Target()].Goal;
+        check(goal>=0 && Separation(goal,Cell(13,13))>=12,"minimum-base MCV keeps a safe distance from the existing construction yard");
+        check(Separation(goal,Cell(20,25))<=10,"minimum-base deployment can use a safely served nearby ore field");
+        Frame+=5*TICKS_PER_SECOND; mcv->Goto_Clear_Spot();
+        check(Deployments[mcv->As_Target()].Goal==goal,"a served-ore minimum deployment remains valid at periodic recheck");
+        w.AI.AIMaxConYardsAndMCVs=0;
+        check(AIExpansion::Base_Limit(&w.AI)==0,"explicitly disabled base expansion does not gain a minimum override");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_CONST,42,25); w.Ore(50,28); Frame=5*TICKS_PER_MINUTE;
+        w.AI.AIMaxConYardsAndMCVs=1;
+        check(!w.AI.AI_Economic_MCV_Ready(),"two deployed yards satisfy the minimum even on a map with rich expansion ore");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_REPAIR,7,13); Frame=5*TICKS_PER_MINUTE;
+        w.AI.AIMaxConYardsAndMCVs=1; w.AI.Money=6399;
+        check(!w.AI.AI_Economic_MCV_Ready(),"minimum-base MCV cannot spend its first-refinery and combat reserve");
+        w.AI.Money=6400;
+        check(w.AI.AI_Economic_MCV_Ready(),"minimum-base MCV supports exact fully reserved funding");
+        Frame+=2*TICKS_PER_MINUTE; w.AI.BuildUnit=UNIT_MCV;
+        check(!w.AI.AI_Economic_MCV_Ready(),"an already queued MCV prevents duplicate minimum-base requests");
+    }
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE; w.AI.AIMaxConYardsAndMCVs=1;
+        w.AI.AIRefineryLimit=1; w.AI.AIWarFactoryLimit=1;
+        w.Build(STRUCT_REFINERY,21,18); w.Build(STRUCT_WEAP,17,8);
+        check(w.AI.AI_Economic_Building()==STRUCT_REPAIR,"missing MCV repair prerequisite can be funded for the second-base minimum");
+        UnitTypeClass::Types[UNIT_HTANK].PrimaryWeapon=&Cannon; w.Unit(UNIT_HTANK,24,25,&w.Enemy);
+        Frame+=10*TICKS_PER_SECOND;
+        check(!w.AI.AI_Economic_MCV_Ready(),"enemy-covered local ore cannot satisfy a safe second-base deployment");
+    }
+    {
+        World w; w.Base(); w.AI.Capacity=2000; w.AI.Tiberium=1799;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"unused storage below the ninety-percent trigger does not buy silos");
+        w.AI.Tiberium=1800;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"storage expansion starts exactly at ninety-percent occupancy");
+        BuildingClass preview; preview.Class=&BuildingTypeClass::Types[STRUCT_STORAGE];
+        int first=Coord_Cell(w.AI.AI_Economic_Location(&preview));
+        check(preview.Class->Legal_Placement(first) && Map.Passes_Proximity_Check(preview.Class,0,preview.Class->Occupy_List(true),first),"planned silo has legal foundation and construction proximity");
+        bool exits_clear=true;
+        for(auto b:Buildings.Data) if(*b==STRUCT_REFINERY || *b==STRUCT_WEAP) {
+            int door=*b==STRUCT_REFINERY?Entrance(b):Coord_Cell(b->Coord)+b->Class->ExitList[0];
+            for(auto p=preview.Class->Occupy_List();*p!=REFRESH_EOL;++p) if(Separation(first+*p,door)<=2) exits_clear=false;
+        }
+        check(exits_clear,"storage placement leaves refinery docking and factory exit traffic clear");
+        auto silo=w.Build(STRUCT_STORAGE,first%128,first/128); w.AI.Capacity+=500; w.AI.Tiberium-=150;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"first silo does not cancel the promised pair after occupancy falls");
+        int second=Coord_Cell(w.AI.AI_Economic_Location(&preview));
+        w.Build(STRUCT_STORAGE,second%128,second/128); w.AI.Capacity+=500; w.AI.Tiberium-=150;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"two silos with sufficient free buffer end expansion");
+        silo->IsInLimbo=true; --w.AI.BQuantity[STRUCT_STORAGE]; w.AI.Capacity-=500;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"loss of one silo restores the established storage pair");
+        AIExpansion::Reset();
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"scenario-state reset can recover the pair from an existing silo");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_STORAGE,7,12); w.Build(STRUCT_STORAGE,7,15);
+        w.AI.Capacity=4000; w.AI.Tiberium=3000;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"exact two-silo free-capacity buffer does not add another silo");
+        w.AI.Tiberium=3001;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"filled buffer can expand beyond two silos when required");
+        w.AI.Capacity=2147483647L; w.AI.Tiberium=2147483647L;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"large storage values use wide arithmetic without overflow");
+        w.AI.Capacity=0;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"zero house storage capacity does not trigger expansion or division");
+        w.AI.Capacity=2000; w.AI.Tiberium=2000; BuildingTypeClass::Types[STRUCT_STORAGE].Capacity=0;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"a zero-capacity silo type is not bought");
+    }
+    {
+        World w; w.Base(); w.AI.Capacity=w.AI.Tiberium=2000; w.AI.Money=2049;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"silos retain the military and power reserve even when full");
+        check(w.AI.Native_Storage_Choice().Type!=STRUCT_STORAGE,"legacy skirmish silo choice cannot bypass reserved funding");
+        w.AI.Money=2050;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"fully funded silo can begin at exact reserve plus price");
+        FactoryClass tank; tank.Balance=1; tank.Object=&tank; w.AI.Factories[RTTI_UNITTYPE]=&tank;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"unpaid tank production is reserved before full-storage expansion");
+        tank.Balance=0; w.AI.UQuantity[UNIT_MCV]=1; w.AI.Money=4000;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"travelling MCV retains its first-refinery budget ahead of silos");
+        w.AI.UQuantity[UNIT_MCV]=0; w.AI.Money=20000; w.AI.IsHuman=true;
+        check(w.AI.AI_Economic_Building()==STRUCT_NONE && w.AI.Native_Storage_Choice().Type==STRUCT_STORAGE,"human storage orders retain legacy control");
+        w.AI.IsHuman=false; Session.Type=GAME_NORMAL;
+        check(w.AI.AI_Economic_Building()==STRUCT_NONE && w.AI.Native_Storage_Choice().Type==STRUCT_STORAGE,"campaign silo choices retain legacy behavior");
+    }
+    {
+        World w; w.Base(); w.AI.Capacity=w.AI.Tiberium=2000;
+        BuildingTypeClass::Types[STRUCT_STORAGE].Allowed=false;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"silo expansion respects scenario technology");
+        BuildingTypeClass::Types[STRUCT_STORAGE].Allowed=true;
+        w.AI.Power=w.AI.Drain+5; BuildingTypeClass::Types[STRUCT_STORAGE].Drain=10;
+        check(w.AI.AI_Economic_Building()==STRUCT_POWER,"full storage funds additional power before a consuming silo");
+        w.AI.Power=w.AI.Drain+10;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"exact spare power permits a storage expansion");
+        w.AI.CurBuildings=w.AI.AIMaxBuildings; w.AI.BuildStructure=STRUCT_NONE; w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_NONE,"storage expansion respects the configured overall building cap");
+        w.AI.CurBuildings=30; w.AI.HumanBuildingCount=1; w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"full storage expansion precedes the relative human base-size limit");
+    }
+    {
+        World w; w.Base(false); w.Ore(40,22); w.Build(STRUCT_POWER,26,18);
+        w.AI.Capacity=w.AI.Tiberium=2000;
+        for(auto & c:Map.Cells) c.Buildable=false;
+        for(int y=0;y<128;++y) Map[Cell(30,y)].Clear=false;
+        Map[Cell(30,22)].Clear=true; Map[Cell(30,22)].Buildable=true; Map[Cell(31,22)].Buildable=true;
+        Units.Data[0]->Coord=Cell_Coord(Cell(40,22)); Units.Data[0]->NavCom=As_Target(Cell(40,22));
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"silo foundation cannot close the only active mining route");
+    }
+    {
+        World w; w.Base(); w.Build(STRUCT_REFINERY,21,18); Frame=5*TICKS_PER_MINUTE;
+        w.AI.AIWarFactoryLimit=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"funded minimum factory can cache its selected legal plot");
+        int plot=Economies[0].FactoryCell;
+        Frame+=1;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP && Economies[0].FactoryCell==plot,"ordinary free-building checks reuse the infrastructure search");
+        for(auto & c:Map.Cells) c.Buildable=false;
+        Frame+=10*TICKS_PER_SECOND;
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP && Economies[0].FactoryCell==-1,"next terrain scan invalidates a no-longer-buildable factory plot");
+        for(auto & c:Map.Cells) c.Buildable=true;
+        Frame+=1;
+        check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"failed infrastructure searches are cached between scan intervals");
+        Frame+=10*TICKS_PER_SECOND;
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"periodic retry discovers newly opened construction space");
     }
     std::cout<<checks<<" actual economic expansion, MCV, refinery and production scenarios passed.\n";
 }

@@ -1,6 +1,7 @@
 // Runs selected HouseClass methods extracted from HOUSE.CPP, with production
 // and world fixtures. The economic decisions and strategy code are unmodified.
 #include "../REDALERT/AISTRATEGY.H"
+#include "../REDALERT/AIEXPANSION.H"
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
@@ -56,8 +57,9 @@ struct BuildingTypeClass : TechnoTypeClass {
     static BuildingTypeClass const & As_Reference(StructType type) { return Types[type]; }
 };
 BuildingTypeClass BuildingTypeClass::Types[12];
-struct HouseClass;
-struct UnitClass {
+class HouseClass;
+class UnitClass {
+public:
     UnitTypeClass const * Class;
     bool Is_Recruitable(HouseClass const *) const { return true; }
 };
@@ -89,7 +91,8 @@ int Random_Pick(int low, int high)
 bool Percent_Chance(int chance) { return chance >= 100; }
 int Distance(COORDINATE a, COORDINATE b) { return std::abs(a - b); }
 
-struct HouseClass {
+class HouseClass {
+public:
     struct ClassFixture { HousesType House; } OwnClass;
     ClassFixture * Class;
     struct ControlFixture { unsigned MaxUnit; int TechLevel; } Control;
@@ -102,6 +105,7 @@ struct HouseClass {
             ? BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of()+BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of() : 0));
     }
     bool EconomyExpansionReady=false;
+    int EconomicBaseLimit=-1;
     bool AI_Economic_MCV_Ready() { return EconomyExpansionReady; }
     bool AllowExtraBaseAtWaypoint, IncreaseLimitDone, IsAlerted, AIDetectedNavalWar, AIDetectHumanGroundWar, NavalAccess;
     int AICurrentSelectedWeap, AICurrentNrOfWEAPs, AIPersonalStrategyMode;
@@ -131,6 +135,7 @@ struct HouseClass {
     int AI_Unit();
     void AI_StrategySwitcher();
 };
+int AIExpansion::Base_Limit(HouseClass const * h) { return h->EconomicBaseLimit >= 0 ? h->EconomicBaseLimit : h->AIMaxConYardsAndMCVs; }
 struct HousesFixture { int ID(HouseClass const * house) const { return house->ID; } } Houses;
 struct BuildingClass {
     BuildingTypeClass Type;
@@ -173,6 +178,16 @@ static void types_reset()
 int main()
 {
     types_reset();
+    {
+        HouseClass h; h.BQuantity[STRUCT_REPAIR]=1; h.BQuantity[STRUCT_REFINERY]=2;
+        h.UQuantity[UNIT_HARVESTER]=4; h.CurUnits=8; h.EconomyExpansionReady=true;
+        h.AIMaxConYardsAndMCVs=1; h.EconomicBaseLimit=2; h.AIMaxTanksNr=0;
+        h.AI_Unit();
+        check(h.BuildUnit==UNIT_MCV,"native production honors the planner's funded second-base minimum");
+        h.BuildUnit=UNIT_NONE; h.BQuantity[STRUCT_CONST]=2;
+        h.AI_Unit();
+        check(h.BuildUnit!=UNIT_MCV,"two deployed yards satisfy the combined base goal without another MCV");
+    }
     HouseClass economy;
     economy.CurUnits = 51;
     economy.BQuantity[STRUCT_REFINERY] = 1;

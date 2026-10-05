@@ -110,7 +110,10 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
     if (Target_Legal(NavCom)) return false; // Preserve an active ore order.
     CELL source = Coord_Cell(Center_Coord());
     if (!Map.In_Radar(source)) return false;
-    if (Map[source].Land_Type() == LAND_TIBERIUM) return true;
+    if (Map[source].Land_Type() == LAND_TIBERIUM) {
+        House->IsTiberiumShort = false;
+        return true;
+    }
     if (radius <= 1) return false;
     radius = HarvestAI::Clamp(radius - 1, 1, MAP_CELL_W + MAP_CELL_H);
     TravelMap field(MAP_CELL_W, MAP_CELL_H);
@@ -148,7 +151,10 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
             best = cell; best_score = score; best_distance = distance;
         }
     }
-    if (best >= 0) Assign_Destination(::As_Target((CELL)best));
+    if (best >= 0) {
+        House->IsTiberiumShort = false;
+        Assign_Destination(::As_Target((CELL)best));
+    }
     return false;
 }
 

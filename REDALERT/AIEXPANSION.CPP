@@ -13,11 +13,13 @@ using HarvestAI::Clamp;
 struct Patch { int Cell, Value, Distance, Claims; };
 struct EconomyState {
     HouseClass const * Owner;
-    int LastFrame, NextScan, NextExpansion, Inventory;
-    int RefineryCell, ExpansionCell;
-    bool RemoteRefinery, Income;
-    EconomyState() : Owner(NULL), LastFrame(-1), NextScan(0), NextExpansion(0), Inventory(-1),
-        RefineryCell(-1), ExpansionCell(-1), RemoteRefinery(false), Income(false) {}
+    int LastFrame, NextScan, NextExpansion, Inventory, DrySince, KennelUntil;
+    int RefineryCell, ExpansionCell, SiloGoal;
+    int FactoryCount, SiloCount, FactoryCell, StorageCell, BaseRefineryCell;
+    bool RemoteRefinery, Income, OreAvailable;
+    EconomyState() : Owner(NULL), LastFrame(-1), NextScan(0), NextExpansion(0), Inventory(-1), DrySince(-1), KennelUntil(0),
+        RefineryCell(-1), ExpansionCell(-1), SiloGoal(0), FactoryCount(-1), SiloCount(-1),
+        FactoryCell(-2), StorageCell(-2), BaseRefineryCell(-2), RemoteRefinery(false), Income(false), OreAvailable(false) {}
 };
 struct DeployState {
     UnitClass const * Owner;
@@ -33,6 +35,20 @@ static bool Enabled(HouseClass const * house)
 {
     return house && !house->IsHuman && house->IsActive && !house->IsDefeated
         && house->IsBaseBuilding && Session.Type != GAME_NORMAL;
+}
+static bool Late_Economy(HouseClass const * house)
+{
+    return Enabled(house) && Frame >= TICKS_PER_MINUTE * AIExpansion::LateMinutes;
+}
+static int Minimum_Limit(HouseClass const * house, int configured)
+{
+    // An enabled category may not leave a developed base permanently at one.
+    return configured > 0 && Late_Economy(house) ? max(configured, (int)AIExpansion::CoreMinimum) : configured;
+}
+static bool Need_Core_Yard(HouseClass const * house)
+{
+    return Late_Economy(house) && house->AIMaxConYardsAndMCVs > 0
+        && const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) < AIExpansion::CoreMinimum;
 }
 static bool Alive(TechnoClass const * object)
 {
@@ -177,10 +193,11 @@ static std::vector<int> Refinery_Sources(TravelMap const & field, HouseClass con
     }
     return sources;
 }
-static std::vector<Patch> Patches(TravelMap const & access, TravelMap const & refineries, HouseClass const * house)
+static std::vector<Patch> Patches(TravelMap const & access, TravelMap const & refineries, HouseClass const * house, bool outpost = true)
 {
     std::vector<Patch> candidates, result;
-    int minimum = max(1000, BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() * 2);
+    int cost = BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of();
+    int minimum = outpost ? max(1000, cost * 2) : max(500, cost / 2);
     std::vector<int> claims(MAP_CELL_TOTAL, 0);
     for (int i = 0; i < Units.Count(); ++i) {
         UnitClass const * truck = Units.Ptr(i);
@@ -293,13 +310,13 @@ static bool Followup_Plots(int yard, int ore, TravelMap const & terrain, std::ve
     return false;
 }
 static int Expansion_Plot(HouseClass const * house, TravelMap const & routes, std::vector<unsigned char> const & unsafe,
-    std::vector<Patch> const & patches, int failed = -1)
+    std::vector<Patch> const & patches, int failed = -1, bool local = false)
 {
     BuildingTypeClass const & yard = BuildingTypeClass::As_Reference(STRUCT_CONST);
     int best = -1, score = INT_MIN;
     for (unsigned int i = 0; i < patches.size(); ++i) {
         Patch const & patch = patches[i];
-        if (const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) > 0 && patch.Distance >= 0 && patch.Distance < AIExpansion::RemoteRoute) continue;
+        if (!local && const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) > 0 && patch.Distance >= 0 && patch.Distance < AIExpansion::RemoteRoute) continue;
         for (int dy = -8; dy <= 8; ++dy) for (int dx = -8; dx <= 8; ++dx) {
             int x = patch.Cell % MAP_CELL_W + dx, y = patch.Cell / MAP_CELL_W + dy;
             if (x <= 0 || x >= MAP_CELL_W - 2 || y <= 0 || y >= MAP_CELL_H - 3) continue;
@@ -407,21 +424,49 @@ static EconomyState & Scan(HouseClass const * house, bool force = false)
     EconomyState & state = Economies[house->Class->House];
     if (state.Owner != house || Frame < state.LastFrame) { state = EconomyState(); state.Owner = house; }
     state.LastFrame = Frame;
-    int inventory = const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) + const_cast<HouseClass *>(house)->QuantityB(STRUCT_REFINERY) * 32 + const_cast<HouseClass *>(house)->QuantityU(UNIT_MCV) * 1024;
-    if (!force && Frame < state.NextScan && inventory == state.Inventory) return state;
+    int inventory = const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) + const_cast<HouseClass *>(house)->QuantityB(STRUCT_REFINERY) * 32 + const_cast<HouseClass *>(house)->QuantityU(UNIT_MCV) * 1024 + const_cast<HouseClass *>(house)->QuantityU(UNIT_HARVESTER) * 32768;
+    int factories = const_cast<HouseClass *>(house)->QuantityB(STRUCT_WEAP);
+    int silos = const_cast<HouseClass *>(house)->QuantityB(STRUCT_STORAGE);
+    if (!force && Frame < state.NextScan && inventory == state.Inventory && factories == state.FactoryCount && silos == state.SiloCount) return state;
+    state.FactoryCount = factories; state.SiloCount = silos;
+    state.FactoryCell = state.StorageCell = state.BaseRefineryCell = -2;
     state.NextScan = Frame + TICKS_PER_SECOND * AIExpansion::ScanSeconds; state.Inventory = inventory;
     state.RefineryCell = state.ExpansionCell = -1; state.RemoteRefinery = state.Income = false;
     TravelMap terrain(MAP_CELL_W, MAP_CELL_H); std::vector<unsigned char> unsafe;
     Terrain(terrain, unsafe, house);
     TravelMap access = terrain; access.Search(Production_Sources(terrain, house));
     TravelMap refs = terrain; refs.Search(Refinery_Sources(terrain, house));
-    std::vector<Patch> patches = Patches(access, refs, house);
-    state.Income = !patches.empty() && Working_Harvesters(house) > 0;
+    // Income and map exhaustion must not depend on the dense, safe deposits
+    // needed to justify an outpost. A single blocked truck is not a house-wide
+    // shortage, and temporarily contested ore still exists.
+    TravelMap physical(MAP_CELL_W, MAP_CELL_H); std::vector<unsigned char> ignored;
+    Terrain(physical, ignored, house, false);
+    std::vector<int> sources = Refinery_Sources(physical, house);
+    std::vector<int> production = Production_Sources(physical, house);
+    sources.insert(sources.end(), production.begin(), production.end());
+    physical.Search(sources);
+    state.OreAvailable = false;
+    for (int cell = 0; cell < MAP_CELL_TOTAL; ++cell)
+        if (physical.Distance[cell] >= 0 && Ore_Value(cell) > 0) { state.OreAvailable = true; break; }
+    bool loaded = false, workforce = false;
+    for (int i = 0; i < Units.Count(); ++i) {
+        UnitClass const * truck = Units.Ptr(i);
+        if (!Alive(truck) || truck->House != house || !truck->Class->IsToHarvest || truck->Team
+            || physical.Distance[Coord_Cell(truck->Center_Coord())] < 0) continue;
+        if (truck->Tiberium > 0 && truck->Mission == MISSION_ENTER) loaded = true;
+        if (truck->Mission == MISSION_HARVEST || truck->Mission == MISSION_GUARD
+            || (truck->Mission == MISSION_ENTER && truck->Tiberium > 0)) workforce = true;
+    }
+    state.Income = const_cast<HouseClass *>(house)->QuantityB(STRUCT_REFINERY) > 0
+        && (loaded || (state.OreAvailable && workforce));
+    if (state.OreAvailable || loaded) state.DrySince = -1;
+    else if (state.DrySince < 0) state.DrySince = Frame;
+    std::vector<Patch> patches = Patches(access, refs, house, false);
     state.RefineryCell = Refinery_Plot(house, terrain, unsafe, patches, state.RemoteRefinery);
     // A legal reachable refinery extension can serve the route without an MCV.
-    if (!state.RemoteRefinery) {
+    if (Need_Core_Yard(house) || !state.RemoteRefinery || const_cast<HouseClass *>(house)->QuantityB(STRUCT_REFINERY) >= Minimum_Limit(house, house->AIRefineryLimit)) {
         TravelMap vehicles = terrain; vehicles.Search(Production_Sources(terrain, house, true));
-        state.ExpansionCell = Expansion_Plot(house, vehicles, unsafe, Patches(vehicles, refs, house));
+        state.ExpansionCell = Expansion_Plot(house, vehicles, unsafe, Patches(vehicles, refs, house), -1, Need_Core_Yard(house));
     }
     return state;
 }
@@ -446,6 +491,66 @@ static int Factory_Plot(HouseClass const * house, BuildingTypeClass const & type
     }
     return best;
 }
+// Keep new storage away from loading/production entrances and preserve routes
+// used by working harvesters. Evaluate connectivity only for a better candidate.
+static int Storage_Plot(HouseClass const * house, BuildingTypeClass const & type)
+{
+    TravelMap terrain(MAP_CELL_W, MAP_CELL_H); std::vector<unsigned char> unsafe;
+    Terrain(terrain, unsafe, house); terrain.Search(Production_Sources(terrain, house));
+    std::vector<int> exits = Refinery_Sources(terrain, house);
+    std::vector<int> factories = Production_Sources(terrain, house, true);
+    exits.insert(exits.end(), factories.begin(), factories.end());
+    std::vector<int> routes = exits;
+    for (int i = 0; i < Units.Count(); ++i) {
+        UnitClass const * truck = Units.Ptr(i);
+        if (!Alive(truck) || truck->House != house || !truck->Class->IsToHarvest) continue;
+        routes.push_back(Coord_Cell(truck->Center_Coord()));
+        if (truck->Mission == MISSION_HARVEST && Target_Legal(truck->NavCom)) routes.push_back(As_Cell(truck->NavCom));
+    }
+    int best = -1, score = INT_MAX;
+    for (int cell = 0; cell < MAP_CELL_TOTAL; ++cell) {
+        if (terrain.Distance[cell] < 0 || !Legal_Site(type, cell, unsafe)
+            || !Map.Passes_Proximity_Check(&type, house->Class->House, type.Occupy_List(true), (CELL)cell)) continue;
+        std::vector<int> body = Footprint(type, cell, false);
+        bool blocked = false;
+        for (unsigned int j = 0; j < body.size() && !blocked; ++j)
+            for (unsigned int k = 0; k < exits.size(); ++k)
+                if (Separation(body[j], exits[k]) <= 2) { blocked = true; break; }
+        int value = terrain.Distance[cell] * 20;
+        if (blocked || value >= score) continue;
+        TravelMap placed = terrain;
+        for (unsigned int j = 0; j < body.size(); ++j) placed.Clear[body[j]] = 0;
+        placed.Search(Production_Sources(placed, house));
+        for (unsigned int j = 0; j < routes.size(); ++j)
+            if (terrain.Valid(routes[j]) && terrain.Distance[routes[j]] >= 0 && placed.Distance[routes[j]] < 0) { blocked = true; break; }
+        if (!blocked) { best = cell; score = value; }
+    }
+    return best;
+}
+// A failed or successful search is reused until the ten-second terrain scan,
+// or an infrastructure inventory change. Free construction decisions stay cheap.
+static int Infrastructure_Plot(HouseClass const * house, BuildingTypeClass const & type)
+{
+    EconomyState & state = Scan(house);
+    int & cell = type.Type == STRUCT_STORAGE ? state.StorageCell
+        : type.Type == STRUCT_REFINERY ? state.BaseRefineryCell : state.FactoryCell;
+    if (cell == -2) cell = type.Type == STRUCT_STORAGE ? Storage_Plot(house, type) : Factory_Plot(house, type);
+    return cell;
+}
+static StructType Invest(HouseClass const * house, BuildingTypeClass const & type, int money, int reserve, int plot)
+{
+    if (!house->Can_Build(&type, house->ActLike) || (long long)money < (long long)type.Cost_Of() + reserve || plot < 0) return STRUCT_NONE;
+    if ((long long)house->Power >= (long long)house->Drain + type.Drain) return type.Type;
+    // Fund the additional power before choosing a building that would brown out.
+    StructType const choices[] = {STRUCT_ADVANCED_POWER, STRUCT_POWER};
+    for (int i = 0; i < 2; ++i) {
+        BuildingTypeClass const & power = BuildingTypeClass::As_Reference(choices[i]);
+        if (power.Power > 0 && house->Can_Build(&power, house->ActLike)
+            && (long long)money >= (long long)power.Cost_Of() + type.Cost_Of() + reserve
+            && Factory_Plot(house, power) >= 0) return power.Type;
+    }
+    return STRUCT_NONE;
+}
 }
 
 namespace AIExpansion {
@@ -454,6 +559,7 @@ void Reset(void)
     for (int i = 0; i < HOUSE_COUNT; ++i) Economies[i] = EconomyState();
     Deployments.clear();
 }
+int Base_Limit(HouseClass const * house) { return house ? Minimum_Limit(house, house->AIMaxConYardsAndMCVs) : 0; }
 void Forget(UnitClass const * unit) { if (unit) Deployments.erase(unit->As_Target()); }
 bool Controls(UnitClass const * unit)
 {
@@ -464,16 +570,43 @@ bool Controls(UnitClass const * unit)
 }
 }
 
+void HouseClass::AI_Refresh_Economy(void)
+{
+    if (!Enabled(this)) return;
+    EconomyState const & state = Scan(this);
+    if (state.OreAvailable || state.Income) IsTiberiumShort = false;
+    else if (state.DrySince >= 0 && Frame - state.DrySince >= TICKS_PER_MINUTE) IsTiberiumShort = true;
+}
+
+bool HouseClass::AI_Economic_Has_Income(void) const
+{
+    return Enabled(this) && Scan(this).Income;
+}
+
+void AIExpansion::Kennel_Sold(HouseClass const * house)
+{
+    if (Enabled(house)) Scan(house).KennelUntil = Frame + TICKS_PER_MINUTE * 2;
+}
+
+bool HouseClass::AI_Economic_Kennel_Ready(void) const
+{
+    if (!Enabled(this)) return true;
+    return BQuantity[STRUCT_KENNEL] == 0 && BQuantity[STRUCT_WEAP] > 0
+        && Power > Drain && AI_Economic_Has_Income() && Frame >= Scan(this).KennelUntil
+        && AI_Economic_Cash() >= AI_Economic_Reserve() + BuildingTypeClass::As_Reference(STRUCT_KENNEL).Cost_Of();
+}
+
 bool HouseClass::AI_Economic_MCV_Ready(void)
 {
+    AI_Refresh_Economy();
     int guards = AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV])
         + (int)CurInfantry / 4 + (int)CurAircraft / 2;
     if (!Enabled(this) || IsTiberiumShort || Power < Drain || BQuantity[STRUCT_REFINERY] == 0
-        || UQuantity[UNIT_HARVESTER] < 2 || Working_Harvesters(this) < 2 || UQuantity[UNIT_MCV] > 0
+        || UQuantity[UNIT_HARVESTER] < 2 || Working_Harvesters(this) < 2 || UQuantity[UNIT_MCV] > 0 || BuildUnit == UNIT_MCV
         || !Can_Build(&UnitTypeClass::As_Reference(UNIT_MCV), ActLike)
         || guards < 6
-        || (int)BQuantity[STRUCT_CONST] >= AIMaxConYardsAndMCVs || (int)CurBuildings + 4 > AIMaxBuildings
-        || !AIStrategy::Expansion_Allowed(guards, AI_Enemy_Forces())) return false;
+        || (int)BQuantity[STRUCT_CONST] + (int)UQuantity[UNIT_MCV] >= AIExpansion::Base_Limit(this)
+        || (int)CurBuildings + 4 > AIMaxBuildings) return false;
     int budget = UnitTypeClass::As_Reference(UNIT_MCV).Cost_Of() + BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() + Reserve(this);
     if (AI_Economic_Cash() < budget) return false;
     EconomyState & state = Scan(this);
@@ -484,29 +617,65 @@ bool HouseClass::AI_Economic_MCV_Ready(void)
 
 StructType HouseClass::AI_Economic_Building(void)
 {
+    AI_Refresh_Economy();
     if (!Enabled(this) || Power < Drain) return STRUCT_NONE;
     BuildingTypeClass const & recovery = BuildingTypeClass::As_Reference(STRUCT_WEAP);
     int truck_reserve = UQuantity[UNIT_HARVESTER] == 0 && !IsTiberiumShort ? UnitTypeClass::As_Reference(UNIT_HARVESTER).Cost_Of() : 0;
     if (BQuantity[STRUCT_WEAP] == 0 && AIWarFactoryLimit > 0 && Can_Build(&recovery, ActLike)
-        && AI_Economic_Cash() >= recovery.Cost_Of() + truck_reserve && Factory_Plot(this, recovery) >= 0) return STRUCT_WEAP;
+        && AI_Economic_Cash() >= recovery.Cost_Of() + truck_reserve && Infrastructure_Plot(this, recovery) >= 0) return STRUCT_WEAP;
     if (IsTiberiumShort) return STRUCT_NONE;
     EconomyState & state = Scan(this);
-    if (!state.Income) return STRUCT_NONE;
+    if (!state.Income || Working_Harvesters(this) == 0) return STRUCT_NONE;
     int money = AI_Economic_Cash(), reserve = AI_Economic_Reserve();
+    BuildingTypeClass const & storage = BuildingTypeClass::As_Reference(STRUCT_STORAGE);
+    bool full = Capacity > 0 && (long long)Tiberium * 100 >= (long long)Capacity * AIExpansion::StoragePercent;
+    if (full || BQuantity[STRUCT_STORAGE] > 0) state.SiloGoal = AIExpansion::CoreMinimum;
+    if (state.SiloGoal > 0 && Capacity > 0 && storage.Capacity > 0
+        && ((int)BQuantity[STRUCT_STORAGE] < state.SiloGoal
+            || (long long)Capacity - Tiberium < (long long)storage.Capacity * AIExpansion::StorageBuffer)) {
+        if (money >= storage.Cost_Of() + reserve && Can_Build(&storage, ActLike)) {
+            StructType investment = Invest(this, storage, money, reserve, Infrastructure_Plot(this, storage));
+            if (investment != STRUCT_NONE) return investment;
+        }
+    }
     BuildingTypeClass const & refinery = BuildingTypeClass::As_Reference(STRUCT_REFINERY);
+    bool late = Late_Economy(this);
+    if (late && AIRefineryLimit > 0 && BQuantity[STRUCT_REFINERY] < AIExpansion::CoreMinimum
+        && Can_Build(&refinery, ActLike) && (long long)money >= (long long)refinery.Cost_Of() + reserve) {
+        int plot = state.RefineryCell >= 0 ? state.RefineryCell : Infrastructure_Plot(this, refinery);
+        StructType investment = Invest(this, refinery, money, reserve, plot);
+        if (investment != STRUCT_NONE) return investment;
+    }
+    BuildingTypeClass const & factory = BuildingTypeClass::As_Reference(STRUCT_WEAP);
+    if (late && AIWarFactoryLimit > 0 && AIMaxTanksNr > 0 && Tank_Cost(this) > 0
+        && BQuantity[STRUCT_WEAP] > 0 && BQuantity[STRUCT_WEAP] < AIExpansion::CoreMinimum
+        && BQuantity[STRUCT_REFINERY] >= AIExpansion::CoreMinimum && Working_Harvesters(this) >= 2
+        && Can_Build(&factory, ActLike)
+        && (long long)money >= (long long)factory.Cost_Of() + reserve + Tank_Cost(this) * BQuantity[STRUCT_WEAP]) {
+        StructType investment = Invest(this, factory, money, reserve + Tank_Cost(this) * BQuantity[STRUCT_WEAP], Infrastructure_Plot(this, factory));
+        if (investment != STRUCT_NONE) return investment;
+    }
     bool need_ref = state.RefineryCell >= 0 && (state.RemoteRefinery || BQuantity[STRUCT_REFINERY] < BQuantity[STRUCT_CONST]
         || UQuantity[UNIT_HARVESTER] > BQuantity[STRUCT_REFINERY] * 2
         || (BQuantity[STRUCT_REFINERY] == 1 && UQuantity[UNIT_HARVESTER] >= 2 && (int)CurUnits >= UQuantity[UNIT_HARVESTER] + 6));
     if ((int)BQuantity[STRUCT_REFINERY] < AIRefineryLimit && need_ref && Can_Build(&refinery, ActLike) && money >= refinery.Cost_Of() + reserve) return STRUCT_REFINERY;
-    BuildingTypeClass const & factory = BuildingTypeClass::As_Reference(STRUCT_WEAP);
     int count = BQuantity[STRUCT_WEAP];
     int speed_limit = NewUnitsEnabled && Rule.AIAftermathfastbuild == 0 ? 2 : AIWarFactoryLimit;
     bool tanks = AIPersonalStrategyMode == 1 || AIPersonalStrategyMode == 2 || AIPersonalStrategyMode == 6 || AIStrategy::Armor_Pressure(AI_Enemy_Forces());
     if (count >= 1 && count < AIWarFactoryLimit && count < speed_limit && tanks && Tank_Cost(this) > 0
         && (int)BQuantity[STRUCT_REFINERY] > count && (int)UQuantity[UNIT_HARVESTER] > count
         && AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]) + 6 < AIMaxTanksNr
-        && Can_Build(&factory, ActLike) && money >= factory.Cost_Of() + reserve + Tank_Cost(this) * count
+        && Can_Build(&factory, ActLike) && (long long)Power >= (long long)Drain + factory.Drain
+        && money >= factory.Cost_Of() + reserve + Tank_Cost(this) * count
         && Factory_Plot(this, factory) >= 0) return STRUCT_WEAP;
+    BuildingTypeClass const & repair = BuildingTypeClass::As_Reference(STRUCT_REPAIR);
+    int expansion_budget = UnitTypeClass::As_Reference(UNIT_MCV).Cost_Of() + refinery.Cost_Of() + reserve;
+    if (BQuantity[STRUCT_REPAIR] == 0 && state.ExpansionCell >= 0
+        && UQuantity[UNIT_MCV] == 0 && UQuantity[UNIT_HARVESTER] >= 2 && Working_Harvesters(this) >= 2
+        && (int)BQuantity[STRUCT_CONST] < AIExpansion::Base_Limit(this) && (int)CurBuildings + 5 <= AIMaxBuildings
+        && AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]) >= 6
+        && Can_Build(&repair, ActLike) && money >= repair.Cost_Of() + expansion_budget
+        && Factory_Plot(this, repair) >= 0) return STRUCT_REPAIR;
     return STRUCT_NONE;
 }
 
@@ -551,8 +720,12 @@ COORDINATE HouseClass::AI_Economic_Location(BuildingClass const * building) cons
 {
     if (!Enabled(this) || !building) return 0;
     int cell = -1;
-    if (*building == STRUCT_REFINERY) cell = Scan(this, true).RefineryCell;
+    if (*building == STRUCT_REFINERY) {
+        cell = Scan(this, true).RefineryCell;
+        if (cell < 0 && Late_Economy(this) && BQuantity[STRUCT_REFINERY] < AIExpansion::CoreMinimum) cell = Factory_Plot(this, *building->Class);
+    }
     if (*building == STRUCT_WEAP) cell = Factory_Plot(this, *building->Class);
+    if (*building == STRUCT_STORAGE) cell = Storage_Plot(this, *building->Class);
     return cell >= 0 ? Cell_Coord((CELL)cell) : 0;
 }
 
@@ -579,7 +752,7 @@ bool UnitClass::MCV_Goto_Resource(void)
         BuildingTypeClass const & yard = BuildingTypeClass::As_Reference(STRUCT_CONST);
         bool initial = House->QuantityB(STRUCT_CONST) == 0;
         bool funded = House->QuantityB(STRUCT_REFINERY) > 0 && Working_Harvesters(House) > 0
-            && House->QuantityB(STRUCT_CONST) < House->AIMaxConYardsAndMCVs
+            && House->QuantityB(STRUCT_CONST) < AIExpansion::Base_Limit(House)
             && House->AI_Economic_Cash() >= BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of()
                 + BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of();
         if (!initial && !funded) patches.clear();
@@ -588,13 +761,13 @@ bool UnitClass::MCV_Goto_Resource(void)
         if (valid && !initial) {
             valid = false;
             for (unsigned int i = 0; i < patches.size(); ++i)
-                if ((patches[i].Distance < 0 || patches[i].Distance >= AIExpansion::RemoteRoute)
+                if ((Need_Core_Yard(House) || patches[i].Distance < 0 || patches[i].Distance >= AIExpansion::RemoteRoute)
                     && Separation(state.Goal, patches[i].Cell) <= 10 && Followup_Plots(top, patches[i].Cell, terrain, unsafe)) { valid = true; break; }
         }
         if (!valid) {
             int failed = Frame < state.FailedUntil ? state.FailedGoal : -1;
             state.Retreat = false;
-            state.Goal = Expansion_Plot(House, terrain, unsafe, patches, failed);
+            state.Goal = Expansion_Plot(House, terrain, unsafe, patches, failed, Need_Core_Yard(House));
             // Establish/recover the first yard even on sparse-ore maps.
             if (initial && Legal_Site(yard, current - MAP_CELL_W - 1, unsafe)) state.Goal = current;
             if (initial && state.Goal < 0) {

@@ -89,6 +89,19 @@ def main():
     start = house.index('\t\t// Funded mining and production infrastructure')
     end = house.index('\n\t\t// Keep the moving MCV', start)
     (output / 'expansion_building_priority.inc').write_text(house[start:end], encoding='ascii')
+    start = house.index('\t\t//dog house')
+    end = house.index('\n\t\t//Soviet barracks', start)
+    (output / 'expansion_kennel_choice.inc').write_text(house[start:end], encoding='ascii')
+    start = house.index('\t\t//Build Silo if storage above x %')
+    end = house.index('\n\t\t//All done. Lets pick one to build:', start)
+    (output / 'expansion_storage_choice.inc').write_text(house[start:end], encoding='ascii')
+    for signature, filename in [
+        ('UrgencyType HouseClass::Check_Raise_Money(void) const', 'expansion_money_check.inc'),
+        ('bool HouseClass::AI_Raise_Money(UrgencyType urgency) const', 'expansion_money_sale.inc')
+    ]:
+        start = house.index(signature)
+        end = house.index('\n}\n', start) + 3
+        (output / filename).write_text(house[start:end], encoding='ascii')
     expansion = (root / 'REDALERT/AIEXPANSION.CPP').read_text(encoding='ascii')
     (output / 'expansion_controller.inc').write_text(expansion.replace('#include "FUNCTION.H"', '// Controlled engine fixture supplied by expansion_test.cpp.'), encoding='ascii')
     mcv_methods = []

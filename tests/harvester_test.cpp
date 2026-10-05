@@ -39,7 +39,7 @@ struct {
     double ConditionRed=0.25, ConditionYellow=0.5;
 } Rule;
 struct { int Normal_Delay() const { return 1; } } MissionControl[8];
-struct HouseClass;
+class HouseClass;
 HouseClass * PlayerPtr=nullptr;
 COORDINATE Cell_Coord(CELL c) { return ((unsigned int)(c/128*256+128)<<16)|(unsigned int)(c%128*256+128); }
 CELL Coord_Cell(COORDINATE c) { return (int)((c&65535)/256+(c>>16)/256*128); }
@@ -70,7 +70,8 @@ CELL As_Cell(TARGET t) {
     if(t&0x80000000u) return (int)(t&65535);
     auto it=Objects.find(t); return it==Objects.end()?-1:Coord_Cell(it->second->Coord);
 }
-struct HouseClass {
+class HouseClass {
+public:
     bool IsHuman=false, Allied=false, IsTiberiumShort=false;
     int ActiveBScan=STRUCTF_REFINERY|STRUCTF_CONST, Capacity=1000, Tiberium=0;
     bool Is_Ally(TechnoClass const * other) const { return other->House==this || (other->House && other->House->Allied); }
@@ -414,6 +415,21 @@ int main() {
         check(Target_Legal(u->NavCom),"stalled-route checks preserve queued player orders");
         u->MissionQueue=MISSION_NONE; HarvestAI::Forget(u); Frame+=TICKS_PER_SECOND; u->Harvest_Think();
         check(Target_Legal(u->NavCom),"a reused unit slot starts with fresh transient route timing");
+    }
+
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(23,20); w.AI.IsTiberiumShort=true;
+        u->Goto_Tiberium(40);
+        check(Target_Legal(u->NavCom) && !w.AI.IsTiberiumShort,"finding a reachable ore destination clears a stale house-wide shortage flag");
+        u->NavCom=0; w.Move(u,23,20); w.AI.IsTiberiumShort=true;
+        check(u->Goto_Tiberium(40) && !w.AI.IsTiberiumShort,"a truck harvesting actual ore clears shortage without waiting for another delivery");
+    }
+    {
+        World w; auto blocked=w.Truck(20,20);
+        blocked->Mission_Harvest();
+        check(blocked->IsUseless && !w.AI.IsTiberiumShort,"one native harvester search failure cannot declare the whole skirmish economy exhausted");
+        w.AI.IsHuman=true; auto human=w.Truck(25,25); human->Mission_Harvest();
+        check(w.AI.IsTiberiumShort,"native human-house shortage reporting is preserved");
     }
     std::cout<<checks<<" actual harvester routing, unloading, damage and state-machine scenarios passed.\n";
 }

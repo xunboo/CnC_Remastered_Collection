@@ -1440,6 +1440,7 @@ void HouseClass::AI(void)
 	/*
 	**	Perform any expert system AI processing.
 	*/
+	AI_Refresh_Economy();
 	AI_Update_Tactics();
 	if (IsBaseBuilding && AITimer == 0) {
 		AITimer = Expert_AI();
@@ -6125,11 +6126,12 @@ UrgencyType HouseClass::Check_Raise_Money(void) const
 
 	UrgencyType urgency = URGENCY_NONE;
 	//Fix for selling loop because low cash. Sell only when low tiberium on the map or no harvester(no cash to buy one), cash drop drastically and stay low - Mini Franki
-	if (Available_Money() < 2000 && IsTiberiumShort || Available_Money() < 1400 && UQuantity[UNIT_HARVESTER] == 0) {
+	bool shortage = IsTiberiumShort && !AI_Economic_Has_Income();
+	if ((Available_Money() < 2000 && shortage) || (Available_Money() < 1400 && UQuantity[UNIT_HARVESTER] == 0)) {
 	//if (Available_Money() < 100) {
 		urgency = URGENCY_LOW;
 	}
-	if (Available_Money() < 100 && IsTiberiumShort || Available_Money() < 100 && UQuantity[UNIT_HARVESTER] == 0) {
+	if (Available_Money() < 100 && (shortage || UQuantity[UNIT_HARVESTER] == 0)) {
 	//if (Available_Money() < 2000 && !Can_Make_Money()) {
 		urgency++;
 	}
@@ -6516,6 +6518,7 @@ bool HouseClass::AI_Raise_Power(UrgencyType urgency) const
 		if (urgency >= _types[i].Urgency) {
 			BuildingClass * b = Find_Building(_types[i].Structure);
 			if (b != NULL) {
+				if (_types[i].Structure == STRUCT_KENNEL) AIExpansion::Kennel_Sold(this);
 				b->Sell_Back(1);
 				return(true);
 			}
@@ -6587,6 +6590,7 @@ bool HouseClass::AI_Raise_Money(UrgencyType urgency) const
 		if (urgency >= _types[i].Urgency) {
 			b = Find_Building(_types[i].Structure);
 			if (b != NULL) {
+				if (_types[i].Structure == STRUCT_KENNEL) AIExpansion::Kennel_Sold(this);
 				b->Sell_Back(1);
 				return(true);
 			}
@@ -6834,12 +6838,13 @@ int HouseClass::AI_Building(void)
 		}
 
 		//dog house
-		if (BQuantity[STRUCT_KENNEL] < AIDogKennelLimit) {
+		if (BQuantity[STRUCT_KENNEL] < AIDogKennelLimit && AI_Economic_Kennel_Ready()) {
 			b = &BuildingTypeClass::As_Reference(STRUCT_KENNEL);
 			if (Can_Build(b, ActLike) && (b->Cost_Of() <= money || hasincome)) {
 				choiceptr = BuildChoice.Alloc();
 				if (choiceptr != NULL) {
-					*choiceptr = BuildChoiceClass(BQuantity[STRUCT_KENNEL] < 1 ? URGENCY_HIGH : URGENCY_MEDIUM, b->Type);
+					*choiceptr = BuildChoiceClass(!IsHuman && Session.Type != GAME_NORMAL ? URGENCY_LOW
+						: (BQuantity[STRUCT_KENNEL] < 1 ? URGENCY_HIGH : URGENCY_MEDIUM), b->Type);
 				}
 			}
 		}
@@ -7297,7 +7302,7 @@ int HouseClass::AI_Building(void)
 		}
 
 		//Build Silo if storage above x %
-		if (Tiberium > (long)(Capacity * 0.99)) {
+		if ((IsHuman || Session.Type == GAME_NORMAL) && Tiberium > (long)(Capacity * 0.99)) {
 			b = &BuildingTypeClass::As_Reference(STRUCT_STORAGE);
 			if (Can_Build(b, ActLike) && (b->Cost_Of() <= money || hasincome)) {
 				choiceptr = BuildChoice.Alloc();
@@ -7417,7 +7422,7 @@ int HouseClass::AI_Unit(void)
 	if (!IsHuman) {
 		bool MCVProductionIsPossible = (IsBaseBuilding && BQuantity[STRUCT_REPAIR] > 0 && Can_Build(&UnitTypeClass::As_Reference(UNIT_MCV), ActLike));
 		bool HaveNoConYardAndNoMCV = ((UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) == 0);
-		bool NotAtConYardLimit = ((UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) < AIMaxConYardsAndMCVs);
+		bool NotAtConYardLimit = ((int)(UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) < AIExpansion::Base_Limit(this));
 		if (MCVProductionIsPossible && (HaveNoConYardAndNoMCV || (!IsTiberiumShort && NotAtConYardLimit && ((Session.Type == GAME_NORMAL && Percent_Chance(33)) || (Session.Type != GAME_NORMAL && AI_Economic_MCV_Ready()))))) {
 			BuildUnit = UNIT_MCV;
 			return(TICKS_PER_SECOND);

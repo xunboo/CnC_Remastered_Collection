@@ -494,6 +494,9 @@ class HouseClass {
 		void AI_Tactical_Attacked(BuildingClass const * building);
 		COORDINATE AI_Defense_Location(BuildingClass const * building) const;
 		StructType AI_Threat_Defense(void) const;
+		void AI_Refresh_Economy(void);
+		bool AI_Economic_Has_Income(void) const;
+		bool AI_Economic_Kennel_Ready(void) const;
 		bool AI_Economic_MCV_Ready(void);
 		int AI_Economic_Reserve(void) const;
 		int AI_Economic_Cash(void) const;

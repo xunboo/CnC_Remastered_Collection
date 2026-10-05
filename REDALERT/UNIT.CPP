@@ -3336,7 +3336,8 @@ int UnitClass::Mission_Harvest(void)
 					} else {
 						Status = GOINGTOIDLE;
 						IsUseless = true;
-						House->IsTiberiumShort = true;
+						// Skirmish exhaustion is checked for the whole economy, not one truck.
+						if (House->IsHuman || Session.Type == GAME_NORMAL) House->IsTiberiumShort = true;
 						return(TICKS_PER_SECOND*7);
 					}
 				} else {

@@ -25,16 +25,36 @@ inline bool Economy_Ready(int refineries, int harvesters, bool ore_exhausted)
     return ore_exhausted || (refineries > 0 && harvesters > 0);
 }
 
-inline bool Can_Launch(int count, int strike, int enemy_mobile, int local_defense)
+enum { ContactTicks = 3, AllOutTanks = 20, AllOutRollSeconds = 30,
+    AllOutChance = 25, AllOutCooldownMinutes = 3, NumericalLead = 30,
+    EconomyRaidTanks = 20, OpportunitySeconds = 2, RetargetSeconds = 6,
+    AirRaidSeconds = 8, ForcedRetrySeconds = 3 };
+
+inline bool Numerical_Advantage(int friendly, int enemy)
 {
-    return count >= 5 && strike >= 2000
-        && (long long)strike * 100 >= (long long)enemy_mobile * 115
+    return (long long)friendly - enemy > NumericalLead;
+}
+
+inline int Attack_Delay(int interval, bool speed_rush)
+{
+    return interval <= 0 || speed_rush ? 2 : Clamp(Clamp(interval, 1, 120) * 2, 4, 15);
+}
+
+inline bool All_Out_Ready(int tanks, int healthy_power)
+{
+    return tanks >= AllOutTanks && healthy_power >= 10000;
+}
+
+inline bool Can_Launch(int count, int strike, int enemy_response, int local_defense)
+{
+    return count >= 4 && strike >= 2000
+        && (long long)strike * 100 >= (long long)enemy_response * 115
         && (long long)strike * 100 >= (long long)local_defense * 150;
 }
 
-inline bool Should_Withdraw(int strike, int enemy_mobile, int nearby_enemy)
+inline bool Should_Withdraw(int strike, int enemy_response, int nearby_enemy)
 {
-    return strike <= 0 || (long long)strike * 100 < (long long)enemy_mobile * 100
+    return strike <= 0 || (long long)strike * 100 < (long long)enemy_response * 100
         || (long long)strike * 100 < (long long)nearby_enemy * 115;
 }
 
