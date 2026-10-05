@@ -188,6 +188,12 @@ class UnitClass :	public DriveClass
 		virtual BuildingClass* Find_Best_Refinery(void) const;
 
         void ReconsiderRefinery(void);
+        bool Harvest_Goto_Ore(int radius);
+        BuildingClass * Harvest_Find_Refinery(void) const;
+        CELL Harvest_Wait_Cell(BuildingClass const * refinery) const;
+        bool Harvest_Retreat(TechnoClass const * attacker);
+        void Harvest_Think(void);
+        bool MCV_Goto_Resource(void);
         
 		/*
 		**	Coordinate inquiry functions. These are used for both display and

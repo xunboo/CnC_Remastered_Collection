@@ -99,6 +99,8 @@
 
 #include	"function.h"
 #include "COORDA.h"
+#include "HARVESTAI.H"
+#include "AIEXPANSION.H"
 //#include "CFEDEBUG.H"
 
 extern void Logic_Switch_Player_Context(ObjectClass *object);
@@ -324,6 +326,8 @@ UnitClass::UnitClass(UnitType classid, HousesType house) :
 	SecondaryFacing(PrimaryFacing),
 	TiberiumUnloadRefinery(TARGET_NONE)
 {
+	HarvestAI::Forget(this);
+	AIExpansion::Forget(this);
 	Reload = 0;
 	House->Tracking_Add(this);
 
@@ -474,6 +478,7 @@ void UnitClass::AI(void)
 	**	if so, if conditions are favorable for firing. When conditions permit, the
 	**	unit will fire upon its target.
 	*/
+	Harvest_Think();
 	Firing_AI();
 #ifdef FIXIT_CSII	//	checked - ajw 9/28/98
 	if (!IsActive) {
@@ -660,7 +665,7 @@ void UnitClass::AI(void)
 	}
 
 	//MCV, AI asks for protection
-	if (*this == UNIT_MCV && !House->IsHuman && Percent_Chance(10) && House->AllowExtraBaseAtWaypoint && !IsUnderAttack) {
+	if (*this == UNIT_MCV && !House->IsHuman && Session.Type == GAME_NORMAL && Percent_Chance(10) && House->AllowExtraBaseAtWaypoint && !IsUnderAttack) {
 		//Scan own buildings to check if MCV is out of range of the base, then send units to protect 
 		int ClosestFriendlyBuilding = -1;
 		for (int BuildingList = 0; BuildingList < Buildings.Count(); BuildingList++) {
@@ -1238,6 +1243,7 @@ ResultType UnitClass::Take_Damage(int & damage, int distance, WarheadType warhea
 	assert(Units.ID(this) == ID);
 	assert(IsActive);
 
+	int previous_strength = Strength;
 	ResultType res = RESULT_NONE;
 
 	/*
@@ -1408,7 +1414,11 @@ ResultType UnitClass::Take_Damage(int & damage, int distance, WarheadType warhea
 		**	Try to crush anyone that fires on this unit if possible. The harvester
 		**	typically is the only one that will qualify here.
 		*/
-		if (!Team.Is_Valid() && source != NULL && !IsTethered && !House->Is_Ally(source) && (!House->IsHuman || Rule.IsAutoCrush)) {
+		bool harvest_retreat = Strength < previous_strength && Harvest_Retreat(source);
+		bool harvest_order = Rule.HarvesterOptimizeEnabled && Class->IsToHarvest
+			&& (Mission != MISSION_HARVEST || (MissionQueue != MISSION_NONE && MissionQueue != MISSION_HARVEST));
+		bool economy_mcv = AIExpansion::Controls(this);
+		if (!harvest_retreat && !harvest_order && !economy_mcv && !Team.Is_Valid() && source != NULL && !IsTethered && !House->Is_Ally(source) && (!House->IsHuman || Rule.IsAutoCrush)) {
 
 			/*
 			**	Try to crush the attacker if it can be crushed by this unit and this unit is
@@ -1692,6 +1702,11 @@ bool UnitClass::Goto_Clear_Spot(void)
 	assert(IsActive);
 
 	Mark(MARK_UP);
+	if (AIExpansion::Controls(this)) {
+		bool ready = MCV_Goto_Resource();
+		Mark(MARK_DOWN);
+		return ready;
+	}
 	if (!Target_Legal(NavCom) && BuildingTypeClass::As_Reference(STRUCT_CONST).Legal_Placement(Adjacent_Cell(Coord_Cell(Center_Coord()), FACING_NW))) {
 		Mark(MARK_DOWN);
 		return(true);
@@ -1823,6 +1838,11 @@ bool UnitClass::Try_To_Deploy(void)
 			*/
 			Mark(MARK_UP);
 			CELL cell = Coord_Cell(Adjacent_Cell(Center_Coord(), FACING_NW));
+			if (AIExpansion::Controls(this) && !MCV_Goto_Resource()) {
+				Mark(MARK_DOWN);
+				IsDeploying = false;
+				return false;
+			}
 			if (!BuildingTypeClass::As_Reference(STRUCT_CONST).Legal_Placement(cell)) {
 				// Chthon CFE Note: make sure it plays for correct player in MP
                 //if (PlayerPtr == House) {
@@ -2587,6 +2607,8 @@ bool UnitClass::Goto_Tiberium(int rad)
 	assert(Units.ID(this) == ID);
 	assert(IsActive);
 
+	if (Rule.HarvesterOptimizeEnabled) return Harvest_Goto_Ore(rad);
+
 	if (!Target_Legal(NavCom)) {
 		CELL center = Coord_Cell(Center_Coord());
 		if (Map[center].Land_Type() == LAND_TIBERIUM) {
@@ -3246,10 +3268,9 @@ int UnitClass::Mission_Harvest(void)
             if ((Rule.HarvesterQueueJumpingEnabled || Rule.HarvesterOptimizeEnabled || Rule.HarvesterLoadBalancing) && Tiberium_Load() == 1) {
 				IsHarvesting = false;
 				Status = FINDHOME;
-                // Chthon CFE Note: we need to make Target_Legal(NavCom)) false when we roll through the FINDHOME branch next click
-                // Not sure how cfehunter figured Assign_Target() will do that, but Assign_Destination() definitely will. At worst it's redundant.
-                Assign_Target(TARGET_NONE); //Clear out the target or it'll assume it already has a refinery to go towards
-                //Assign_Destination(TARGET_NONE);
+                // Cancel the ore destination before FINDHOME chooses a refinery.
+                Assign_Target(TARGET_NONE);
+                Assign_Destination(TARGET_NONE);
                 // Only blank the unload refinery if we're using "load balancing" rather than "refinery remembering"
 				//if (ActiveCFEPatchConfig.EnableHarvyOptimize || ActiveCFEPatchConfig.EnableHarvyLoadBalancing){
 				if (Rule.HarvesterOptimizeEnabled || Rule.HarvesterLoadBalancing){
@@ -3279,7 +3300,7 @@ int UnitClass::Mission_Harvest(void)
 			// Default this was always remember. This results in harvesters going further and further while closer Tiberium could be available.
 			// Do not remember last location and scan for closest tiberium from unload area
 			// Or do remember and start here again with harvesting.
-			if (!Percent_Chance(Rule.AIHarvesterMemoryValue)) {
+			if (Rule.HarvesterOptimizeEnabled || !Percent_Chance(Rule.AIHarvesterMemoryValue)) {
 				ArchiveTarget = TARGET_NONE;
 			}
 
@@ -3387,7 +3408,7 @@ int UnitClass::Mission_Harvest(void)
                             // The comments say it picks a cell near self, with a lean toward an optional object supplied by parameter
                             // In reality, it picks a cell near the object supplied by parameter, or near self if supplied is null.
                             // This is DIFFERENT than what it did in TD. Probably the cause of tons of bugs...
-                            Assign_Destination(::As_Target(Nearby_Location(nearest)));
+                            Assign_Destination(::As_Target(Rule.HarvesterOptimizeEnabled ? Harvest_Wait_Cell(nearest) : Nearby_Location(nearest)));
                             //CFE_Debug_Printf("Harvester %i didn't get RADIO_ROGER. Should have destination assigned.", this);
                         }
                     }
@@ -3894,6 +3915,7 @@ MoveType UnitClass::Can_Enter_Cell(CELL cell, FacingType ) const
  *=============================================================================================*/
 void UnitClass::Init(void)
 {
+	HarvestAI::Reset();
 	Units.Free_All();
 }
 
@@ -4222,7 +4244,7 @@ int UnitClass::Mission_Guard(void)
 	}
 
 	if (*this == UNIT_MCV && House->IsBaseBuilding) {
-		Assign_Mission(MISSION_UNLOAD);
+		Assign_Mission(AIExpansion::Controls(this) ? MISSION_HUNT : MISSION_UNLOAD);
         const MissionType exitmission = (Mission == MISSION_NONE) ? MISSION_UNLOAD : Mission;
 		return(MissionControl[exitmission].Normal_Delay() + Random_Pick(0, 2));
 	}
@@ -4915,6 +4937,7 @@ static int _refinery_compare(const void * left, const void * right)
 
 BuildingClass* UnitClass::Find_Best_Refinery(void) const
 {
+    if (Rule.HarvesterOptimizeEnabled) return Harvest_Find_Refinery();
     /*
     Warning for anyone messing around with this:
 	RA did away with the cell distance function, so all distance functions return leptons.
@@ -6012,22 +6035,27 @@ int UnitClass::Mission_Guard_Area(void)
 }
 
 // If a harvester is going to a refinery, but isn't first in line for it, clear out the refinery and change the AI status to FINDHOME
-void  UnitClass::ReconsiderRefinery(void){
-    //CFE_Debug_Printf("Harvster %i entered ReconsiderRefinery()", this);
-    if (   //Tiberium_Load() == 0x0100 &&
-            Target_Legal(NavCom) &&
-            TiberiumUnloadRefinery != TARGET_NONE &&
-            Mission == MISSION_HARVEST &&
-            Status == 2 //&& // 2 is FINDHOME in the enum in UnitClass::Mission_Harvest() - should be in this state if not first in line
-            //!In_Radio_Contact() // should be in this state if not first in line
-        ) {
+void UnitClass::ReconsiderRefinery(void)
+{
+    if (Rule.HarvesterOptimizeEnabled) {
+        if (!Class->IsToHarvest || !IsActive || IsInLimbo || Team || IsTethered || IsDumping
+            || Mission != MISSION_HARVEST || Status != 2 || In_Radio_Contact()
+            || (MissionQueue != MISSION_NONE && MissionQueue != MISSION_HARVEST)) return;
+        BuildingClass * best = Harvest_Find_Refinery();
+        BuildingClass * current = Tiberium_Unload_Refinery();
+        if (best != current || (best && !best->In_Radio_Contact() && !best->Is_Something_Attached())) {
             Assign_Destination(TARGET_NONE);
             Assign_Target(TARGET_NONE);
-            TiberiumUnloadRefinery = TARGET_NONE;
-            //Status = 2; // 2 is FINDHOME in the enum in UnitClass::Mission_Harvest()
-            //CFE_Debug_Printf("Harvster %i Reconsidered!", this);
+            TiberiumUnloadRefinery = best ? best->As_Target() : TARGET_NONE;
         }
         return;
+    }
+    if (Target_Legal(NavCom) && TiberiumUnloadRefinery != TARGET_NONE
+        && Mission == MISSION_HARVEST && Status == 2) {
+        Assign_Destination(TARGET_NONE);
+        Assign_Target(TARGET_NONE);
+        TiberiumUnloadRefinery = TARGET_NONE;
+    }
 }
 
 // this function is part of the minelayer's attack-move logic

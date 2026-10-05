@@ -71,6 +71,7 @@ class FactoryClass : private StageClass
 		bool Start(void);
 		bool Suspend(void);
 		int Completion(void);
+		int Remaining_Cost(void) const {return(Balance > 0 ? Balance : 0);};
 		TechnoClass * Get_Object(void) const;
 		int Get_Special_Item(void) const;
 		void AI(void);

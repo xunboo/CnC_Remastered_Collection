@@ -105,6 +105,9 @@
     <ClCompile Include="ADATA.CPP" />
     <ClCompile Include="ADPCM.CPP" />
     <ClCompile Include="AIRCRAFT.CPP" />
+    <ClCompile Include="HARVESTAI.CPP" />
+    <ClCompile Include="AIEXPANSION.CPP" />
+    <ClCompile Include="AITACTICS.CPP" />
     <ClCompile Include="ANIM.CPP" />
     <ClCompile Include="AUDIO.CPP" />
     <ClCompile Include="B64PIPE.CPP" />
@@ -399,6 +402,9 @@
     <ClInclude Include="ABSTRACT.H" />
     <ClInclude Include="AIRCRAFT.H" />
     <ClInclude Include="AISTRATEGY.H" />
+    <ClInclude Include="HARVESTAI.H" />
+    <ClInclude Include="AIEXPANSION.H" />
+    <ClInclude Include="AITACTICS.H" />
     <ClInclude Include="ANIM.H" />
     <ClInclude Include="AUDIO.H" />
     <ClInclude Include="B64PIPE.H" />

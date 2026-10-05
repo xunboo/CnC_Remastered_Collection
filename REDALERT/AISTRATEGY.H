@@ -31,6 +31,26 @@ inline int Combat_Unit_Count(int total, int harvesters, int mcvs)
 	return count > 0 ? count : 0;
 }
 
+inline bool Armor_Pressure(EnemyForces const & enemy)
+{
+	return enemy.Armor >= 6 && (long long)enemy.Armor * 2 >= enemy.Infantry;
+}
+
+inline bool Expansion_Allowed(int combat_units, EnemyForces const & enemy)
+{
+	// Recovery of the last construction yard is handled separately by the game.
+	return (long long)combat_units * 4 >= (long long)enemy.Armor * 4
+		+ enemy.Infantry / 2 + (long long)enemy.Aircraft * 2;
+}
+
+inline bool Infantry_Spending_Allowed(EnemyForces const & enemy, int factories,
+	int infantry, int combat_units, int money)
+{
+	if (factories <= 0 || !Armor_Pressure(enemy)) return true;
+	// Rockets and Shock Troopers remain escorts; save factory money for armor.
+	return infantry < 6 + combat_units / 3 && (infantry < 3 || money >= 1800);
+}
+
 inline int Production_Weight(UnitRole role, int base, int owned, int total,
 	EnemyForces const & enemy, bool anti_air = false)
 {
@@ -41,7 +61,11 @@ inline int Production_Weight(UnitRole role, int base, int owned, int total,
 
 	int weight = base;
 	if (role == ROLE_ARMOR && enemy.Armor > 0) weight += 16;
-	if (role == ROLE_ANTI_INFANTRY && enemy.Infantry > enemy.Armor * 2) weight += 20;
+	if (Armor_Pressure(enemy)) {
+		if (role == ROLE_ARMOR) weight += 64;
+		if (role == ROLE_ANTI_INFANTRY || role == ROLE_SPECIAL) weight = (weight + 3) / 4;
+	}
+	if (role == ROLE_ANTI_INFANTRY && (long long)enemy.Infantry > (long long)enemy.Armor * 2) weight += 20;
 	if (role == ROLE_SIEGE) {
 		if (enemy.Defenses > 0) weight += 16;
 		if (owned * 4 >= total + 4) weight = (weight + 3) / 4;

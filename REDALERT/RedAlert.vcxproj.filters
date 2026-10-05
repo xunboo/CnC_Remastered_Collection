@@ -33,6 +33,15 @@
     <ClCompile Include="ADPCM.CPP">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="HARVESTAI.CPP">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AIEXPANSION.CPP">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AITACTICS.CPP">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="AIRCRAFT.CPP">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -910,6 +919,15 @@
   <ItemGroup>
     <ClInclude Include="ABSTRACT.H">
       <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HARVESTAI.H">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AIEXPANSION.H">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AITACTICS.H">
+      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="AIRCRAFT.H">
       <Filter>Source Files</Filter>

@@ -488,6 +488,18 @@ class HouseClass {
 
 		bool HouseHasFlag = false; //Not used yet, we need to improve capture the flag for AI in the future....
 
+		static void AI_Tactics_Init(void);
+		bool AI_Update_Tactics(void);
+		void AI_Replan_Attack(void);
+		void AI_Tactical_Attacked(BuildingClass const * building);
+		COORDINATE AI_Defense_Location(BuildingClass const * building) const;
+		StructType AI_Threat_Defense(void) const;
+		bool AI_Economic_MCV_Ready(void);
+		int AI_Economic_Reserve(void) const;
+		int AI_Economic_Cash(void) const;
+		int AI_Economic_Combat_Budget(void) const;
+		StructType AI_Economic_Building(void);
+		COORDINATE AI_Economic_Location(BuildingClass const * building) const;
 		void AI_CalcDynamics(void);
 		AIStrategy::EnemyForces AI_Enemy_Forces(void) const;
 		bool AI_Has_Naval_Access(void) const;

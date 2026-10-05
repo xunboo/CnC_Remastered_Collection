@@ -142,6 +142,7 @@
 */
 #include "SidebarGlyphx.h"
 #include "AISTRATEGY.H"
+#include "AIEXPANSION.H"
 
 
 static bool AI_Is_Opponent(HouseClass const & house, HouseClass const * other)
@@ -157,7 +158,7 @@ AIStrategy::EnemyForces HouseClass::AI_Enemy_Forces(void) const
 	for (HousesType h = HOUSE_FIRST; h < HOUSE_COUNT; h++) {
 		HouseClass const * other = HouseClass::As_Pointer(h);
 		if (!AI_Is_Opponent(house, other)) continue;
-		forces.Armor += AIStrategy::Combat_Unit_Count(other->CurUnits, other->UQuantity[UNIT_HARVESTER], other->UQuantity[UNIT_MCV]);
+		forces.Armor += other->UQuantity[UNIT_HTANK] + other->UQuantity[UNIT_MTANK] + other->UQuantity[UNIT_MTANK2] + other->UQuantity[UNIT_LTANK] + other->UQuantity[UNIT_CHRONOTANK] + other->UQuantity[UNIT_TESLATANK] + other->UQuantity[UNIT_ARTY] + other->UQuantity[UNIT_V2_LAUNCHER];
 		forces.Infantry += other->CurInfantry;
 		forces.Aircraft += other->AQuantity[AIRCRAFT_MIG] + other->AQuantity[AIRCRAFT_YAK] +
 			other->AQuantity[AIRCRAFT_LONGBOW] + other->AQuantity[AIRCRAFT_HIND];
@@ -232,7 +233,10 @@ int HouseClass::AI_Unit_Weight(UnitType type, AIStrategy::EnemyForces const & en
 	case UNIT_MRJ: case UNIT_MGG: role = AIStrategy::ROLE_SUPPORT; base = 2; break;
 	case UNIT_MAD: case UNIT_DEMOTRUCK: role = AIStrategy::ROLE_SPECIAL; base = 4; break;
 	case UNIT_CHRONOTANK: base = 8; break;
-	default: base = UnitTypeClass::As_Reference(type).PrimaryWeapon != NULL ? 12 : 1; break;
+	default: role = AIStrategy::ROLE_SUPPORT; base = UnitTypeClass::As_Reference(type).PrimaryWeapon != NULL ? 12 : 1; break;
+	}
+	if (AIStrategy::Armor_Pressure(enemy)) {
+		if (type == UNIT_HTANK || type == UNIT_MTANK || type == UNIT_MTANK2 || type == UNIT_TESLATANK) base += 32;
 	}
 	return AIStrategy::Production_Weight(role, base, house.UQuantity[type],
 		AIStrategy::Combat_Unit_Count(house.CurUnits, house.UQuantity[UNIT_HARVESTER], house.UQuantity[UNIT_MCV]), enemy, anti_air);
@@ -1008,6 +1012,8 @@ bool HouseClass::Can_Build(ObjectTypeClass const * type, HousesType house) const
  *=========================================================================*/
 void HouseClass::Init(void)
 {
+	AI_Tactics_Init();
+	AIExpansion::Reset();
 	Houses.Free_All();
 
 	for (HousesType index = HOUSE_FIRST; index < HOUSE_COUNT; index++) {
@@ -1105,7 +1111,7 @@ void HouseClass::AI(void)
 	**	see if the attack timer has expired. If it has, then create the attack
 	**	teams.
 	*/
-	if (IsAlerted && AlertTime == 0) {
+	if (IsAlerted && AlertTime == 0 && (Session.Type == GAME_NORMAL || IsHuman)) {
 
 		/*
 		**	Adjusted to reduce maximum number of teams created.
@@ -1150,7 +1156,7 @@ void HouseClass::AI(void)
 	**	Create teams for this house if necessary.
 	** (Use the same timer for some extra capture-the-flag logic.)
 	*/
-	if (!IsAlerted && !TeamTime) {
+	if (!IsAlerted && !TeamTime && (Session.Type == GAME_NORMAL || IsHuman)) {
 
 		TeamTypeClass const * ttype = Suggested_New_Team(false);
 		if (ttype) {
@@ -1434,6 +1440,7 @@ void HouseClass::AI(void)
 	/*
 	**	Perform any expert system AI processing.
 	*/
+	AI_Update_Tactics();
 	if (IsBaseBuilding && AITimer == 0) {
 		AITimer = Expert_AI();
 	}
@@ -2039,6 +2046,7 @@ void HouseClass::Super_Weapon_Handler(void)
 void HouseClass::Attacked(BuildingClass* source)
 {
 	assert(Houses.ID(this) == ID);
+	AI_Tactical_Attacked(source);
 
 #ifdef FIXIT_BASE_ANNOUNCE
 	if (SpeakAttackDelay == 0 && ((Session.Type == GAME_NORMAL && IsPlayerControl) || PlayerPtr->Class->House == Class->House)) {
@@ -2881,7 +2889,7 @@ void HouseClass::Special_Weapon_AI(SpecialWeaponType id)
 	if (SuperWeapon[SPC_CHRONOSPHERE].Is_Ready() && Percent_Chance(25)) {
 		//Select the MCV who want to go to an impossible to move waypoint(I'll add impossible move trigger when I find it)
 		//For test, AI teleport MCV to waypoint even if its passable. For final, only teleport when impassable
-		if (Rule.AIAllowLastMCVToDoSecondBase && AllowExtraBaseAtWaypoint && UQuantity[UNIT_MCV] > 0) {
+		if (Session.Type == GAME_NORMAL && Rule.AIAllowLastMCVToDoSecondBase && AllowExtraBaseAtWaypoint && UQuantity[UNIT_MCV] > 0) {
 			UnitClass * mcvtoteleport = NULL;
 			TARGET LocationToJumpTo = NULL;
 			for (int UnitIndex = 0; UnitIndex < Units.Count(); UnitIndex++) {
@@ -5413,6 +5421,10 @@ BuildingClass * HouseClass::Find_Building(StructType type, ZoneType zone) const
 COORDINATE HouseClass::Find_Build_Location(BuildingClass * building) const
 {
 	assert(Houses.ID(this) == ID);
+	COORDINATE economy = AI_Economic_Location(building);
+	if (economy) return economy;
+	COORDINATE defense = AI_Defense_Location(building);
+	if (defense) return defense;
 
 	int zonerating[ZONE_COUNT];
 	struct {
@@ -5504,7 +5516,7 @@ COORDINATE HouseClass::Find_Build_Location(BuildingClass * building) const
 	for (int zz = 0; zz < ARRAY_SIZE(_zones); zz++) {
 		ZoneType tryzone = _zones[(zz + start) % ARRAY_SIZE(_zones)];
 		zcell = Find_Cell_In_Zone(building, tryzone);
-		if (zcell) return(zcell);
+		if (zcell) return(Cell_Coord(zcell));
 	}
 
 	return(NULL);
@@ -6168,6 +6180,7 @@ UrgencyType HouseClass::Check_Raise_Power(void) const
 bool HouseClass::AI_Attack(UrgencyType)
 {
 	assert(Houses.ID(this) == ID);
+	if (!IsHuman && Session.Type != GAME_NORMAL) return AI_Update_Tactics();
 	int index;
 
 	AI_CalcDynamics();
@@ -6755,7 +6768,7 @@ int HouseClass::AI_Building(void)
 				return(TICKS_PER_SECOND);
 			}
 		}
-		if (!IsHuman && BQuantity[STRUCT_REFINERY] == 0 && !IsTiberiumShort) {
+		if (!IsHuman && !IsTiberiumShort && BQuantity[STRUCT_REFINERY] == 0) {
 			b = &BuildingTypeClass::As_Reference(STRUCT_REFINERY);
 			if (Can_Build(b, ActLike) && b->Cost_Of() <= money) {
 				BuildStructure = b->Type;
@@ -6770,9 +6783,32 @@ int HouseClass::AI_Building(void)
 				return(TICKS_PER_SECOND);
 			}
 		}
+		// A threatened approach gets a funded counter before optional expansion.
+		StructType response = AI_Threat_Defense();
+		if (response != STRUCT_NONE) {
+			b = &BuildingTypeClass::As_Reference(response);
+			int reserve = UQuantity[UNIT_HARVESTER] == 0 && !IsTiberiumShort ? UnitTypeClass::As_Reference(UNIT_HARVESTER).Cost_Of() : 0;
+			if (b->Cost_Of() <= money - reserve) {
+				BuildStructure = response;
+				return(TICKS_PER_SECOND);
+			}
+		}
+		// Funded mining and production infrastructure precedes the relative base-size
+		// limit, while still respecting the configured overall and category limits.
+		StructType economic = AI_Economic_Building();
+		if (economic != STRUCT_NONE && (int)CurBuildings < AIMaxBuildings) {
+			BuildStructure = economic;
+			return(TICKS_PER_SECOND);
+		}
 		if (!IsHuman && ((int)CurBuildings >= AIMaxBuildings ||
 			(HumanBuildingCount > 0 && (int)CurBuildings >= max(12, HumanBuildingCount * Rule.AIBuildingsMultiplier)))) {
 			return(TICKS_PER_SECOND);
+		}
+
+		// Keep the moving MCV's refinery and military reserve out of optional spending.
+		if (!IsHuman && Session.Type != GAME_NORMAL && UQuantity[UNIT_MCV] > 0) {
+			money = max(0, AI_Economic_Cash() - AI_Economic_Reserve());
+			hasincome = false;
 		}
 
 		//Lets do the build stuff:
@@ -6839,7 +6875,7 @@ int HouseClass::AI_Building(void)
 		}
 
 		//refinery
-		if (BQuantity[STRUCT_REFINERY] < AIRefineryLimit) {
+		if (BQuantity[STRUCT_REFINERY] < AIRefineryLimit && (IsHuman || Session.Type == GAME_NORMAL)) {
 			b = &BuildingTypeClass::As_Reference(STRUCT_REFINERY);
 			if (Can_Build(b, ActLike) && (money >= b->Cost_Of() || hasincome) && !IsTiberiumShort) {
 				choiceptr = BuildChoice.Alloc();
@@ -6976,7 +7012,7 @@ int HouseClass::AI_Building(void)
 		}
 
 		//warfactory
-		if (BQuantity[STRUCT_WEAP] < AIWarFactoryLimit) {
+		if (BQuantity[STRUCT_WEAP] < AIWarFactoryLimit && (BQuantity[STRUCT_WEAP] == 0 || IsHuman || Session.Type == GAME_NORMAL)) {
 			b = &BuildingTypeClass::As_Reference(STRUCT_WEAP);
 			if (Can_Build(b, ActLike) && (money >= b->Cost_Of() || hasincome)) {
 				choiceptr = BuildChoice.Alloc();
@@ -7337,7 +7373,7 @@ int HouseClass::AI_Unit(void)
 	}
 
 	//Check if AI is allowed to make a new base
-	if (!IsHuman && UQuantity[UNIT_MCV] > 0 && Rule.AIAllowLastMCVToDoSecondBase && AIMaxConYardsAndMCVs > 1) {
+	if (!IsHuman && Session.Type == GAME_NORMAL && UQuantity[UNIT_MCV] > 0 && Rule.AIAllowLastMCVToDoSecondBase && AIMaxConYardsAndMCVs > 1) {
 		AllowExtraBaseAtWaypoint = false;
 		//Check if its the last MCV to expand to a 2nd base
 		if (((UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) == AIMaxConYardsAndMCVs) && IncreaseLimitDone == false) {
@@ -7377,12 +7413,12 @@ int HouseClass::AI_Unit(void)
 		}
 	}
 
-	//Make MCV by Bast75, if no conyard directly, otherwise 33% change of expanding
+	// Recover the last yard; fund safe skirmish expansion through the economy planner.
 	if (!IsHuman) {
 		bool MCVProductionIsPossible = (IsBaseBuilding && BQuantity[STRUCT_REPAIR] > 0 && Can_Build(&UnitTypeClass::As_Reference(UNIT_MCV), ActLike));
 		bool HaveNoConYardAndNoMCV = ((UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) == 0);
 		bool NotAtConYardLimit = ((UQuantity[UNIT_MCV] + BQuantity[STRUCT_CONST]) < AIMaxConYardsAndMCVs);
-		if (MCVProductionIsPossible && (HaveNoConYardAndNoMCV || (!IsTiberiumShort && NotAtConYardLimit && Percent_Chance(33)))) {
+		if (MCVProductionIsPossible && (HaveNoConYardAndNoMCV || (!IsTiberiumShort && NotAtConYardLimit && ((Session.Type == GAME_NORMAL && Percent_Chance(33)) || (Session.Type != GAME_NORMAL && AI_Economic_MCV_Ready()))))) {
 			BuildUnit = UNIT_MCV;
 			return(TICKS_PER_SECOND);
 		}
@@ -7395,7 +7431,7 @@ int HouseClass::AI_Unit(void)
 
 	//Naval war and no ground war? Don't make too much of this, focus more on naval.
 	if (AIDetectedNavalWar && !AIDetectHumanGroundWar && !IsHuman) {
-		if (Can_Build(&UnitTypeClass::As_Reference(UNIT_CHRONOTANK), ActLike) && Percent_Chance(33) && (int)UQuantity[UNIT_CHRONOTANK] < Rule.AIMaxChronotanks) {
+		if (Can_Build(&UnitTypeClass::As_Reference(UNIT_CHRONOTANK), ActLike) && UnitTypeClass::As_Reference(UNIT_CHRONOTANK).Cost_Of() <= AI_Economic_Combat_Budget() && Percent_Chance(33) && (int)UQuantity[UNIT_CHRONOTANK] < Rule.AIMaxChronotanks) {
 			BuildUnit = UNIT_CHRONOTANK; // These can chronoshift to enemy, other units are useless in non-groundwar.
 			return(TICKS_PER_SECOND);
 		}
@@ -7488,11 +7524,12 @@ int HouseClass::AI_Unit(void)
 
 		int counter[UNIT_COUNT];
 		int total = 0;
+		int unit_budget = AI_Economic_Combat_Budget();
 		AIStrategy::EnemyForces forces = AI_Enemy_Forces();
 		UnitType index;
 		for (index = UNIT_FIRST; index < UNIT_COUNT; index++) {
 			UnitTypeClass const * utype = &UnitTypeClass::As_Reference(index);
-			if (Can_Build(utype, ActLike) && utype->Cost_Of() <= Available_Money()
+			if (Can_Build(utype, ActLike) && utype->Cost_Of() <= unit_budget
 				&& utype->Type != UNIT_HARVESTER 
 				&& utype->Type != UNIT_MINELAYER 
 				&& utype->Type != UNIT_MCV 
@@ -7643,7 +7680,7 @@ int HouseClass::AI_Vessel(void)
 		int bestcount = 0;
 		VesselType bestlist[VESSEL_COUNT];
 		for (VesselType utype = VESSEL_FIRST; utype < VESSEL_COUNT; utype++) {
-			if (counter[utype] > 0 && Can_Build(&VesselTypeClass::As_Reference(utype), Class->House) && VesselTypeClass::As_Reference(utype).Cost_Of() <= Available_Money()) {
+			if (counter[utype] > 0 && Can_Build(&VesselTypeClass::As_Reference(utype), Class->House) && VesselTypeClass::As_Reference(utype).Cost_Of() <= AI_Economic_Combat_Budget()) {
 				if (bestval == -1 || bestval < counter[utype]) {
 					bestval = counter[utype];
 					bestcount = 0;
@@ -7670,7 +7707,7 @@ int HouseClass::AI_Vessel(void)
 		int total = 0;
 		for (int index = 0; index < ARRAY_SIZE(types); ++index) {
 			VesselTypeClass const & type = VesselTypeClass::As_Reference(types[index]);
-			if (!Can_Build(&type, ActLike) || type.Cost_Of() > Available_Money()) {
+			if (!Can_Build(&type, ActLike) || type.Cost_Of() > AI_Economic_Combat_Budget()) {
 				weights[index] = 0;
 				continue;
 			}
@@ -7818,7 +7855,7 @@ int HouseClass::AI_Infantry(void)
 		for (InfantryType utype = INFANTRY_FIRST; utype < INFANTRY_COUNT; utype++) {
 
 			if (utype != INFANTRY_DOG || !(IScan & INFANTRYF_DOG)) {
-				if (counter[utype] > 0 && Can_Build(&InfantryTypeClass::As_Reference(utype), Class->House) && InfantryTypeClass::As_Reference(utype).Cost_Of() <= Available_Money()) {
+				if (counter[utype] > 0 && Can_Build(&InfantryTypeClass::As_Reference(utype), Class->House) && InfantryTypeClass::As_Reference(utype).Cost_Of() <= AI_Economic_Combat_Budget()) {
 					if (bestval == -1 || bestval < counter[utype]) {
 						bestval = counter[utype];
 						bestcount = 0;
@@ -7845,6 +7882,10 @@ int HouseClass::AI_Infantry(void)
 		if (Session.Type == GAME_NORMAL) {
 			budget.Reserve = Rule.InfantryReserve;
 			budget.BaseMultiplier = Rule.InfantryBaseMult;
+		} else if (!IsHuman && !AIStrategy::Infantry_Spending_Allowed(forces,
+			AIMaxTanksNr > 0 ? BQuantity[STRUCT_WEAP] : 0, CurInfantry,
+			AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]), AI_Economic_Combat_Budget())) {
+			return(TICKS_PER_SECOND);
 		}
 		// Expansion infantry use a legacy folded counter in HouseClass. Count
 		// actual troops here so Mechanics do not read beyond that array and
@@ -7871,9 +7912,9 @@ int HouseClass::AI_Infantry(void)
 		int count = 0;
 		int total = 0;
 		for (InfantryType index = INFANTRY_FIRST; index < INFANTRY_COUNT; index++) {
-			if (Can_Build(&InfantryTypeClass::As_Reference(index), ActLike) && InfantryTypeClass::As_Reference(index).Cost_Of() <= Available_Money()) {
+			if (Can_Build(&InfantryTypeClass::As_Reference(index), ActLike) && InfantryTypeClass::As_Reference(index).Cost_Of() <= AI_Economic_Combat_Budget()) {
 				typetrack[count].Value = 0;
-				if (enemy_counts[index] > own_counts[index] || Available_Money() > budget.Reserve || CurInfantry < CurBuildings * budget.BaseMultiplier) {
+				if (enemy_counts[index] > own_counts[index] || AI_Economic_Combat_Budget() > budget.Reserve || CurInfantry < CurBuildings * budget.BaseMultiplier) {
 
 					switch (index) {
 					case INFANTRY_E1: //rifle soldier
@@ -8008,9 +8049,9 @@ int HouseClass::AI_Aircraft(void)
 		int anti_armor_chance = forces.Armor > 0 && forces.Armor >= forces.Infantry ? 85 : (forces.Infantry > 0 ? 30 : 70);
 		if (BQuantity[STRUCT_HELIPAD] > AQuantity[AIRCRAFT_LONGBOW] + AQuantity[AIRCRAFT_HIND]) {
 			bool can_longbow = Can_Build(&AircraftTypeClass::As_Reference(AIRCRAFT_LONGBOW), ActLike) &&
-				AircraftTypeClass::As_Reference(AIRCRAFT_LONGBOW).Cost_Of() <= Available_Money();
+				AircraftTypeClass::As_Reference(AIRCRAFT_LONGBOW).Cost_Of() <= AI_Economic_Combat_Budget();
 			bool can_hind = Can_Build(&AircraftTypeClass::As_Reference(AIRCRAFT_HIND), ActLike) &&
-				AircraftTypeClass::As_Reference(AIRCRAFT_HIND).Cost_Of() <= Available_Money();
+				AircraftTypeClass::As_Reference(AIRCRAFT_HIND).Cost_Of() <= AI_Economic_Combat_Budget();
 			if (can_longbow && can_hind) {
 				BuildAircraft = Percent_Chance(anti_armor_chance) ? AIRCRAFT_LONGBOW : AIRCRAFT_HIND;
 				return(TICKS_PER_SECOND);
@@ -8025,9 +8066,9 @@ int HouseClass::AI_Aircraft(void)
 
 		if (BQuantity[STRUCT_AIRSTRIP] > AQuantity[AIRCRAFT_MIG] + AQuantity[AIRCRAFT_YAK]) {
 			bool can_mig = Can_Build(&AircraftTypeClass::As_Reference(AIRCRAFT_MIG), ActLike) &&
-				AircraftTypeClass::As_Reference(AIRCRAFT_MIG).Cost_Of() <= Available_Money();
+				AircraftTypeClass::As_Reference(AIRCRAFT_MIG).Cost_Of() <= AI_Economic_Combat_Budget();
 			bool can_yak = Can_Build(&AircraftTypeClass::As_Reference(AIRCRAFT_YAK), ActLike) &&
-				AircraftTypeClass::As_Reference(AIRCRAFT_YAK).Cost_Of() <= Available_Money();
+				AircraftTypeClass::As_Reference(AIRCRAFT_YAK).Cost_Of() <= AI_Economic_Combat_Budget();
 			if (can_mig && can_yak) {
 				BuildAircraft = Percent_Chance(anti_armor_chance) ? AIRCRAFT_MIG : AIRCRAFT_YAK;
 				return(TICKS_PER_SECOND);

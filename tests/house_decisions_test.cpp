@@ -97,6 +97,12 @@ struct HouseClass {
     unsigned CurUnits, CurInfantry, CurAircraft;
     int AIMaxTanksNr, AIMaxConYardsAndMCVs, IQ, ActLike, Money;
     bool IsHuman, IsActive, IsDefeated, Ally, IsBaseBuilding, IsTiberiumShort, UnitInProduction;
+    int AI_Economic_Combat_Budget() const {
+        return max(0, Money - (!IsHuman && Session.Type != GAME_NORMAL && UQuantity[UNIT_MCV]>0
+            ? BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of()+BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of() : 0));
+    }
+    bool EconomyExpansionReady=false;
+    bool AI_Economic_MCV_Ready() { return EconomyExpansionReady; }
     bool AllowExtraBaseAtWaypoint, IncreaseLimitDone, IsAlerted, AIDetectedNavalWar, AIDetectHumanGroundWar, NavalAccess;
     int AICurrentSelectedWeap, AICurrentNrOfWEAPs, AIPersonalStrategyMode;
     int BQuantity[12], UQuantity[UNIT_COUNT];
@@ -218,6 +224,25 @@ int main()
     check(chrono.BuildUnit == UNIT_CHRONOTANK, "a lost Chrono Tank can be replaced below its cap");
 
     types_reset();
+    for (int i=0;i<UNIT_COUNT;++i) UnitTypeClass::Types[i].Allowed=i==UNIT_MTANK || i==UNIT_MCV;
+    HouseClass expansion;
+    expansion.BQuantity[STRUCT_REFINERY]=1; expansion.BQuantity[STRUCT_REPAIR]=1;
+    expansion.UQuantity[UNIT_HARVESTER]=2; expansion.CurUnits=10; expansion.EconomyExpansionReady=true;
+    expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_MCV,"an approved skirmish economy plan orders an MCV without the legacy random chance");
+    expansion.BuildUnit=UNIT_NONE; expansion.EconomyExpansionReady=false; expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_MTANK,"a rejected expansion leaves the war factory producing fighting units");
+    expansion.BuildUnit=UNIT_NONE; expansion.EconomyExpansionReady=true; expansion.BQuantity[STRUCT_REPAIR]=0; expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_MTANK,"economic MCV production still needs its native repair-depot prerequisite");
+    expansion.BuildUnit=UNIT_NONE; expansion.BQuantity[STRUCT_REPAIR]=1; expansion.BQuantity[STRUCT_CONST]=2; expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_MTANK,"native unit selection enforces the yard limit before an MCV request");
+    expansion.BuildUnit=UNIT_NONE; expansion.EconomyExpansionReady=false; expansion.BQuantity[STRUCT_CONST]=1;
+    expansion.UQuantity[UNIT_MCV]=1; expansion.Money=2399; expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_NONE,"native combat production preserves refinery and power funding for a moving MCV");
+    expansion.Money=2400; expansion.AI_Unit();
+    check(expansion.BuildUnit==UNIT_MTANK,"native combat production can spend the surplus above expansion funding");
+
+    types_reset();
     HouseClass strategy;
     strategy.AIPersonalStrategyMode = 3;
     strategy.AI_StrategySwitcher();
@@ -254,6 +279,17 @@ int main()
     Rule.AIStrategyMode = 99;
     strategy.AI_StrategySwitcher();
     check(strategy.AIPersonalStrategyMode == 1, "invalid forced strategies do not create an invalid selection");
+
+    HouseClass counter;
+    counter.Forces.Armor = 30;
+    check(counter.AI_Unit_Weight(UNIT_MTANK, counter.Forces) > counter.AI_Unit_Weight(UNIT_LTANK, counter.Forces), "heavy enemy armor favors main battle tanks over light tanks");
+    check(counter.AI_Unit_Weight(UNIT_MTANK, counter.Forces) > counter.AI_Unit_Weight(UNIT_JEEP, counter.Forces) * 10, "massed armor strongly reduces anti-infantry vehicle production");
+    UnitTypeClass::Types[UNIT_TRUCK].PrimaryWeapon = NULL;
+    check(counter.AI_Unit_Weight(UNIT_TRUCK, counter.Forces) < 5, "unarmed trucks cannot inherit the armor-response bonus");
+    for (int i = 0; i < UNIT_COUNT; ++i) UnitTypeClass::Types[i].Allowed = i == UNIT_LTANK;
+    counter.AI_Unit();
+    check(counter.BuildUnit == UNIT_LTANK, "heavy-unit preferences retain a legal low-tech fallback");
+    types_reset();
 
     HouseClass own, foe, ally, neutral;
     foe.OwnClass.House = 1;

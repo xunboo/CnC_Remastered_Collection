@@ -52,6 +52,15 @@ int main()
     check(Production_Weight(ROLE_SUPPORT, 2, 1, 0, empty) == 0, "support vehicles cannot displace a new fighting force");
     check(Production_Weight(ROLE_SPECIAL, 4, 2, 16, empty) == 0, "special explosive vehicles stay a small part of the army");
 
+    check(Armor_Pressure(armor), "massed armor activates a heavy-weapons response");
+    check(!Armor_Pressure(infantry), "infantry-heavy opposition keeps anti-infantry production available");
+    check(!Infantry_Spending_Allowed(armor, 1, 20, 15, 10000), "massed enemy tanks cap infantry escorts even with abundant cash");
+    check(!Infantry_Spending_Allowed(armor, 1, 5, 10, 1000), "infantry does not spend the last factory money against armor");
+    check(Infantry_Spending_Allowed(armor, 0, 20, 15, 1000), "games without usable tank factories retain infantry production");
+    check(Infantry_Spending_Allowed(armor, 1, 2, 0, 1000), "a small initial infantry screen remains affordable");
+    check(!Expansion_Allowed(5, armor), "inferior armor strength postpones optional MCV expansion");
+    check(Expansion_Allowed(25, armor), "a strong army can afford to expand its economy");
+
     InfantryBudget naval = Infantry_Budget(true, false, 0, 3);
     InfantryBudget rush = Infantry_Budget(false, true, 0, 5);
     InfantryBudget mixed = Infantry_Budget(true, true, 3, 2);
