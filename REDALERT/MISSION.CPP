@@ -45,6 +45,7 @@
  *   MissionClass::Is_Recruitable_Mission -- Determines if this mission is recruitable for a te*
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOGENGINE.H"
 #include	"function.h"
 
 
@@ -227,6 +228,7 @@ void MissionClass::AI(void)
 	*/
 	BStart(BENCH_MISSION);
 	if (Timer == 0 && Strength > 0) {
+		AILog::MissionScope decision_log(this);
 		switch (Mission) {
 			default:
 				Timer = Mission_Sleep();
@@ -384,6 +386,7 @@ void MissionClass::Assign_Mission(MissionType order)
 
 	if (order != MISSION_NONE && Mission != order)  {
 		MissionQueue = order;
+		AILog::Object_Order(this, "order_mission", static_cast<unsigned int>(order));
 	}
 }
 

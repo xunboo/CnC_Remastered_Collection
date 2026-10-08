@@ -19,3 +19,11 @@
 # Python test caches
 __pycache__/
 *.py[cod]
+
+# Local LLM credentials (publish llm.example.ini instead)
+llm.ini
+llm.ini.*
+
+# Per-match gameplay and LLM audit data
+**/log/*.jsonl
+**/log/bridge_*.log

@@ -1,4 +1,5 @@
 // Copyright 2026. Distributed under the project's GPLv3 license.
+#include "AILOG.H"
 #include "FUNCTION.H"
 #include "AIEXPANSION.H"
 #include "HARVESTAI.H"
@@ -468,6 +469,11 @@ static EconomyState & Scan(HouseClass const * house, bool force = false)
         TravelMap vehicles = terrain; vehicles.Search(Production_Sources(terrain, house, true));
         state.ExpansionCell = Expansion_Plot(house, vehicles, unsafe, Patches(vehicles, refs, house), -1, Need_Core_Yard(house));
     }
+    AILog::Record(Frame, house->Class->House, "economy_scan", AILog::Fields().Boolean("income", state.Income)
+        .Boolean("ore_available", state.OreAvailable).Boolean("remote_refinery", state.RemoteRefinery)
+        .Number("refinery_cell", state.RefineryCell).Number("expansion_cell", state.ExpansionCell)
+        .Number("dry_since", state.DrySince).Number("next_expansion", state.NextExpansion)
+        .Number("factory_count", state.FactoryCount).Number("silo_count", state.SiloCount).Number("silo_goal", state.SiloGoal));
     return state;
 }
 static int Factory_Plot(HouseClass const * house, BuildingTypeClass const & type)
@@ -791,6 +797,10 @@ bool UnitClass::MCV_Goto_Resource(void)
         }
         state.Route = Route_To(terrain, state.Goal);
         state.Waypoint = Route_Waypoint(terrain, state.Route);
+        AILog::Record(Frame, House->Class->House, "mcv_deployment_plan", AILog::Fields().Number("unit", As_Target())
+            .Number("current", current).Number("goal", state.Goal).Number("waypoint", state.Waypoint)
+            .Number("route_length", state.Route.size()).Boolean("retreat", state.Retreat)
+            .Boolean("initial_base", initial).Boolean("funded", funded).Number("patch_count", patches.size()));
     }
     if (state.Goal < 0) { if (Target_Legal(NavCom)) Assign_Destination(TARGET_NONE); return false; }
     if (state.Goal == current) {

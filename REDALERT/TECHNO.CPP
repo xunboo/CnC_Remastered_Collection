@@ -130,7 +130,9 @@
  *   TechnoTypeClass::Time_To_Build -- Fetches the time to build this object.                  *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOGENGINE.H"
 #include	"function.h"
+#include "LLMBRIDGE.H"
 
 //#include "CFEDEBUG.H"
 #include <math.h> // for ceil()
@@ -652,6 +654,7 @@ TechnoClass::TechnoClass(RTTIType rtti, int id, HousesType house) :
 	ElectricZapWhich(0),
 	PurchasePrice(0)
 {
+	LLMBridge::Object_Created(As_Target());
 	//IsOwnedByPlayer = (PlayerPtr == House);
 	// Added for multiplayer changes. ST - 4/24/2019 10:40AM
 	IsDiscoveredByPlayerMask = 0;
@@ -3416,6 +3419,7 @@ void TechnoClass::Assign_Target(TARGET target)
 	**	Set the unit's targeting computer.
 	*/
 	TarCom = target;
+	AILog::Object_Order(this, "order_target", target);
 }
 
 

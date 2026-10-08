@@ -78,6 +78,7 @@
  *   FootClass::Unlimbo -- Unlimbos object and performs special fixups.                        *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOGENGINE.H"
 #include	"function.h"
 #include <algorithm>
 
@@ -1875,6 +1876,7 @@ void FootClass::Assign_Destination(TARGET target)
 	assert(IsActive);
 
 	NavCom = target;
+	AILog::Object_Order(this, "order_destination", target);
 
     // Chthon CFE Note: helicopters need to this for Q-move input
     if (JustModifiedNavCom){

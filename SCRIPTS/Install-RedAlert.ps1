@@ -2,7 +2,9 @@
 param(
     [string]$ModDirectory = 'C:\Program Files (x86)\Steam\steamapps\workshop\content\1213210\2221741447\AIBoost',
     [string]$SourceDirectory = '',
-    [string]$MetadataFile = ''
+    [string]$MetadataFile = '',
+    [string]$LLMConfig = '',
+    [switch]$ReplaceLLMConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +38,34 @@ foreach ($fileName in @('RedAlert.dll', 'RedAlert.pdb')) {
         SHA256 = (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash
     }
 }
+$bridgeExecutable = Join-Path $SourceDirectory 'LLMBridge.exe'
+if (Test-Path -LiteralPath $bridgeExecutable -PathType Leaf) {
+    $copies += [pscustomobject]@{
+        Name = 'LLMBridge.exe'
+        Source = $bridgeExecutable
+        Target = Join-Path $targetData 'LLMBridge.exe'
+        SHA256 = (Get-FileHash -LiteralPath $bridgeExecutable -Algorithm SHA256).Hash
+    }
+    if (!$LLMConfig) {
+        $LLMConfig = Join-Path $repositoryRoot 'llm.ini'
+        if (!(Test-Path -LiteralPath $LLMConfig -PathType Leaf)) {
+            $LLMConfig = Join-Path $repositoryRoot 'llm.example.ini'
+        }
+    }
+    $LLMConfig = [System.IO.Path]::GetFullPath($LLMConfig)
+    $targetConfig = Join-Path $targetData 'llm.ini'
+    if ($ReplaceLLMConfig -or !(Test-Path -LiteralPath $targetConfig -PathType Leaf)) {
+        if (!(Test-Path -LiteralPath $LLMConfig -PathType Leaf)) { throw 'The source LLM configuration does not exist.' }
+        $copies += [pscustomobject]@{
+            Name = 'llm.ini'
+            Source = $LLMConfig
+            Target = $targetConfig
+            SHA256 = (Get-FileHash -LiteralPath $LLMConfig -Algorithm SHA256).Hash
+        }
+    }
+} else {
+    Write-Warning 'LLMBridge.exe was not built; automatic startup requires the packaged EXE beside RedAlert.dll.'
+}
 if (!$MetadataFile) {
     $MetadataFile = Join-Path (Split-Path -Parent $SourceDirectory) 'ccmod.json'
     if (!(Test-Path -LiteralPath $MetadataFile -PathType Leaf)) {
@@ -62,7 +92,7 @@ $runningGame = @(Get-Process -Name ClientG,InstanceServerG -ErrorAction Silently
 if ($runningGame.Count -gt 0) {
     throw 'Close Red Alert (ClientG and InstanceServerG) before installing. No mod files were changed.'
 }
-if (!$PSCmdlet.ShouldProcess($ModDirectory, 'Back up and install RedAlert.dll, matching symbols and mod metadata')) { return }
+if (!$PSCmdlet.ShouldProcess($ModDirectory, 'Back up and install RedAlert.dll, symbols, mod metadata and available portable LLM files')) { return }
 
 $backupName = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 $backupDirectory = Join-Path $repositoryRoot ('review\installed-backups\' + $backupName)
@@ -86,7 +116,10 @@ $record = [ordered]@{
     utc = [DateTime]::UtcNow.ToString('o')
     mod_directory = $ModDirectory
     backup_directory = $backupDirectory
-    files = @($copies | Select-Object Name,Target,SHA256)
+    files = @($copies | ForEach-Object {
+        if ($_.Name -eq 'llm.ini') { $_ | Select-Object Name,Target }
+        else { $_ | Select-Object Name,Target,SHA256 }
+    })
 }
 $recordPath = Join-Path $backupDirectory 'installation.json'
 $utf8 = New-Object System.Text.UTF8Encoding($false)

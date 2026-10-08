@@ -1,0 +1,102 @@
+{
+  "type": "function",
+  "name": "submit_tactical_plan",
+  "strict": true,
+  "description": "Propose a bounded tactical plan; the game validates and executes it.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "protocol_version": {
+        "type": "integer",
+        "enum": [
+          1
+        ]
+      },
+      "match_id": {
+        "type": "string"
+      },
+      "based_on_snapshot_seq": {
+        "type": "integer"
+      },
+      "controlled_house_id": {
+        "type": "integer"
+      },
+      "expires_at_frame": {
+        "type": "integer"
+      },
+      "orders": {
+        "type": "array",
+        "maxItems": 3,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "hold",
+                "attack_target",
+                "defend_area",
+                "retreat_to",
+                "harass_economy",
+                "raid_power"
+              ]
+            },
+            "group_id": {
+              "type": "string",
+              "enum": [
+                "ground",
+                "naval",
+                "air"
+              ]
+            },
+            "target_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destination_cell": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "commit_percent": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 100
+            },
+            "withdraw_avg_hp_percent": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 90
+            }
+          },
+          "required": [
+            "action",
+            "commit_percent",
+            "destination_cell",
+            "group_id",
+            "target_id",
+            "withdraw_avg_hp_percent"
+          ]
+        }
+      }
+    },
+    "required": [
+      "based_on_snapshot_seq",
+      "controlled_house_id",
+      "expires_at_frame",
+      "match_id",
+      "orders",
+      "protocol_version"
+    ],
+    "additionalProperties": false
+  }
+}

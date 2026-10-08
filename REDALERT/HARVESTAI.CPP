@@ -1,4 +1,5 @@
 // Copyright 2026. Distributed under the project's GPLv3 license.
+#include "AILOG.H"
 #include "FUNCTION.H"
 #include "HARVESTAI.H"
 #include <map>
@@ -152,6 +153,8 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
         }
     }
     if (best >= 0) {
+        AILog::Record(Frame, House->Class->House, "harvester_ore_selected", AILog::Fields().Number("unit", As_Target())
+            .Number("source", source).Number("destination", best).Number("score", best_score).Number("distance", best_distance).Number("nearby_band", band));
         House->IsTiberiumShort = false;
         Assign_Destination(::As_Target((CELL)best));
     }
@@ -185,7 +188,13 @@ BuildingClass * UnitClass::Harvest_Find_Refinery(void) const
     }
     // Avoid bouncing between almost-equivalent refineries. A newly free
     // refinery can still win over a busy current choice.
-    if (current && current_queue == best_queue && current_score <= best_score + 2) return current;
+    if (current && current_queue == best_queue && current_score <= best_score + 2) {
+        AILog::Record(Frame, House->Class->House, "harvester_refinery_selected", AILog::Fields().Number("unit", As_Target())
+            .Number("refinery", current->As_Target()).Number("score", current_score).Number("queue", current_queue).Text("reason", "preserve_close_existing_choice"));
+        return current;
+    }
+    AILog::Record(Frame, House->Class->House, "harvester_refinery_selected", AILog::Fields().Number("unit", As_Target())
+        .Number("refinery", best ? best->As_Target() : 0).Number("score", best_score).Number("queue", best_queue).Text("reason", best ? "best_reachable_queue" : "no_valid_refinery"));
     return best;
 }
 
@@ -223,6 +232,8 @@ bool UnitClass::Harvest_Retreat(TechnoClass const * attacker)
     if (!Harvest_Automatic(this)) return false;
     BuildingClass * refinery = Harvest_Find_Refinery();
     if (!refinery) return false;
+    AILog::Record(Frame, House->Class->House, "harvester_retreat", AILog::Fields().Number("unit", As_Target())
+        .Number("attacker", attacker->As_Target()).Number("refinery", refinery->As_Target()).Number("health", Strength).Number("cargo", Tiberium));
     if (AttackMove) ResetAttackMove();
     IsHarvesting = false;
     Clear_Navigation_List();

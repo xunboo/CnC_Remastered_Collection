@@ -2,6 +2,7 @@
 #define FIXIT_CSII
 #include "../REDALERT/AITACTICS.H"
 #include "../REDALERT/AISTRATEGY.H"
+#include "../REDALERT/LLMBRIDGE.H"
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -10,6 +11,29 @@
 #include <map>
 #include <memory>
 #include <vector>
+
+namespace BridgeFixture {
+bool Enabled=false, Local=false;
+LLM::Identities Identities;
+std::string Snapshot;
+std::vector<unsigned char> Pending;
+unsigned int Epoch=0;
+}
+void LLMBridge::Set_Local_Game(bool allowed) { BridgeFixture::Local=allowed; }
+bool LLMBridge::Can_Control(int house) { return BridgeFixture::Enabled && BridgeFixture::Local && house==0; }
+void LLMBridge::Reset() {
+    BridgeFixture::Enabled=false; BridgeFixture::Local=false;
+    BridgeFixture::Identities.Clear(); BridgeFixture::Snapshot.clear(); BridgeFixture::Pending.clear();
+}
+void LLMBridge::New_Match(unsigned int & low,unsigned int & high) { low=++BridgeFixture::Epoch; high=1; }
+void LLMBridge::Object_Created(unsigned int target) { BridgeFixture::Identities.Created(target); }
+unsigned int LLMBridge::Object_Generation(unsigned int target) { return BridgeFixture::Identities.Generation(target); }
+bool LLMBridge::Publish(std::string const & snapshot) { BridgeFixture::Snapshot=snapshot; return true; }
+bool LLMBridge::Receive(LLM::Plan & plan,bool & invalid) {
+    invalid=false; if(BridgeFixture::Pending.empty()) return false;
+    invalid=!LLM::Decode(BridgeFixture::Pending.data(),(unsigned int)BridgeFixture::Pending.size(),plan);
+    BridgeFixture::Pending.clear(); return true;
+}
 
 typedef int CELL;
 typedef unsigned int COORDINATE;
@@ -69,6 +93,7 @@ struct BulletTypeClass { bool IsAntiGround=true, IsAntiAircraft=false, IsSubSurf
 struct WarheadTypeClass { double Modifier[5]={1,1,1,1,1}; } StandardWarhead;
 struct WeaponTypeClass { BulletTypeClass * Bullet=&GroundBullet; WarheadTypeClass * WarheadPtr=&StandardWarhead; int Attack=40, Range=4*256; } Cannon, AntiAir;
 struct TechnoTypeClass {
+    char const * IniName="unit";
     WeaponTypeClass const * PrimaryWeapon=&Cannon;
     WeaponTypeClass const * SecondaryWeapon=nullptr;
     int Armor=0, Cost=1000, MaxStrength=500, MaxSpeed=10, Speed=0, MZone=0, Type=0, MaxAmmo=5;
@@ -148,6 +173,7 @@ struct FakeCell {
     bool Is_Clear_To_Move(int speed,bool,bool,int,int) const { return Clear && (speed==SPEED_FLOAT ? Water : !Water); }
 };
 struct FakeMap {
+    int MapCellX=0, MapCellY=0, MapCellWidth=128, MapCellHeight=128;
     FakeCell Cells[MAP_CELL_TOTAL];
     bool In_Radar(CELL c) const { return c>=0 && c<MAP_CELL_TOTAL; }
     FakeCell & operator[](CELL c) { assert(In_Radar(c)); return Cells[c]; }
@@ -170,6 +196,7 @@ struct HouseClass {
     bool Can_Build(TechnoTypeClass const * type,int) const { return type->Allowed; }
     int Which_Zone(CELL cell) const { return ::Distance(Center,Cell_Coord(cell))<=10*256?0:-1; }
     AIStrategy::EnemyForces AI_Enemy_Forces() const { return Forces; }
+    int Available_Money() const { return 5000; }
     static void AI_Tactics_Init();
     void AI_Tactical_Attacked(BuildingClass const *);
     bool AI_Update_Tactics();
@@ -206,6 +233,7 @@ struct World {
         auto unit=std::make_unique<T>(); T * result=unit.get();
         result->House=&house; result->Class=specification.get(); result->Kind=kind; result->Coord=Cell_Coord(Cell(x,y));
         result->Handle=(TARGET)Objects.size()+1; Targets[result->Handle]=result;
+        LLMBridge::Object_Created(result->Handle);
         Objects.push_back(std::move(unit)); Types.push_back(std::move(specification)); return result;
     }
     UnitClass * Tank(HouseClass & house,int x,int y)
@@ -235,8 +263,212 @@ struct World {
     }
 };
 
-int main()
+static LLM::Plan ModelPlan(World & world)
 {
+    BridgeFixture::Enabled=true; LLMBridge::Set_Local_Game(true);
+    world.AI.AI_Update_Tactics();
+    LLMSnapshot const & snapshot=LLMStates[0].History.back();
+    LLM::Plan plan={}; plan.Magic=LLM::PlanMagic; plan.Version=1;
+    plan.MatchLow=LLMMatchLow; plan.MatchHigh=LLMMatchHigh; plan.House=0;
+    plan.SnapshotSeq=snapshot.Seq; plan.ExpiresAt=snapshot.FrameNumber+LLM::MaxPlanTicks;
+    return plan;
+}
+static void ModelOrder(LLM::Plan & plan,int group,int action,TechnoClass * target=nullptr,int x=-1,int y=-1,int commit=75)
+{
+    LLM::Order order={group,action,target?target->As_Target():0,target?LLMBridge::Object_Generation(target->As_Target()):0,x,y,commit,35};
+    plan.Orders[plan.Count++]=order;
+}
+static void Deliver(World & world,LLM::Plan const & plan)
+{
+    auto bytes=reinterpret_cast<unsigned char const *>(&plan);
+    BridgeFixture::Pending.assign(bytes,bytes+32+32*plan.Count);
+    Frame+=3; world.AI.AI_Update_Tactics();
+}
+
+int main(int argc,char ** argv)
+{
+    if ((argc==2 || argc==3) && std::string(argv[1])=="--llm-pipe") {
+        std::string action=argc==3 ? argv[2] : "attack_target";
+        if (action!="hold" && action!="attack_target" && action!="defend_area") return 2;
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        w.Building(w.Enemy,75,70,STRUCT_CONST);
+        const_cast<TechnoTypeClass *>(Units.Ptr(0)->Class)->IniName="tank\"\\\n";
+        ModelPlan(w);
+        std::cout<<BridgeFixture::Snapshot<<std::endl;
+        std::string hex;
+        if (!(std::cin>>hex) || hex.size()%2 || hex.size()>256) return 2;
+        for(unsigned int i=0;i<hex.size();i+=2) {
+            unsigned int value=0;
+            std::istringstream digits(hex.substr(i,2)); digits>>std::hex>>value;
+            if (digits.fail()) return 2;
+            BridgeFixture::Pending.push_back((unsigned char)value);
+        }
+        Frame+=3; w.AI.AI_Update_Tactics();
+        if (action=="attack_target") {
+            check(TacticalStates[0].Ground.External && TacticalStates[0].Ground.Target==target->As_Target()
+                && TacticalStates[0].Ground.Members.size()==6,
+                "Python function-call bytes reach the actual tactical controller");
+        } else if (action=="hold") {
+            check(LLM_Group_Controlled(&w.AI,LLM::GROUND) && TacticalStates[0].Ground.Phase==STRIKE_HOLD,
+                "real model hold is accepted by the actual tactical controller");
+        } else {
+            check(LLM_Group_Controlled(&w.AI,LLM::GROUND) && Units.Ptr(0)->NavCom==As_Target(Cell(35,80)),
+                "real model area reinforcement reaches the native destination");
+        }
+        w.Tick();
+        std::cout<<BridgeFixture::Snapshot<<std::endl;
+        return 0;
+    }
+    {
+        World w; w.Army(31); w.Building(w.Enemy,80,43,STRUCT_CONST);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD); Deliver(w,plan);
+        check(LLM_Group_Controlled(&w.AI,LLM::GROUND) && TacticalStates[0].Ground.Phase==STRIKE_HOLD,
+            "a valid model hold cancels an existing numerical assault");
+        w.Tick(false,3);
+        check(TacticalStates[0].Ground.Phase==STRIKE_HOLD,
+            "native all-out and numerical policies cannot overwrite a model hold");
+        Frame=plan.ExpiresAt; w.AI.AI_Update_Tactics();
+        check(!LLM_Group_Controlled(&w.AI,LLM::GROUND) && TacticalStates[0].Ground.Forced,
+            "expired model control restores the native numerical assault");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        w.Building(w.Enemy,75,70,STRUCT_CONST);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target); Deliver(w,plan);
+        check(TacticalStates[0].Ground.External && TacticalStates[0].Ground.Target==target->As_Target()
+            && TacticalStates[0].Ground.Members.size()==6,
+            "a model attack uses its exact target and commits seventy-five percent of an eight-tank force");
+        w.Tick(true,7);
+        check(TacticalStates[0].Ground.Target==target->As_Target(),
+            "periodic native retargeting retains the external objective");
+        for(auto unit:Units.Data) unit->Strength=100;
+        Frame+=3; w.AI.AI_Update_Tactics();
+        check(LLMStates[0].Directives[0].Order.ActionID==LLM::RETREAT_TO && !TacticalStates[0].Ground.External,
+            "a model health threshold delegates a retreat instead of continuing an unsafe strike");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target);
+        LLMBridge::Object_Created(target->As_Target()); Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0 && !LLM_Group_Controlled(&w.AI,0),
+            "slot reuse invalidates a target captured before construction of its new instance");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target); Deliver(w,plan);
+        LLMBridge::Object_Created(target->As_Target()); Frame+=3; w.AI.AI_Update_Tactics();
+        check(!LLM_Group_Controlled(&w.AI,0),"active model attacks are invalidated by target instance reuse");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target); Deliver(w,plan);
+        TARGET reused=TacticalStates[0].Ground.Members[0];
+        auto unit=static_cast<FootClass *>(As_Techno(reused));
+        LLMBridge::Object_Created(reused); unit->IsFormationMove=false;
+        unit->Mission=MISSION_MOVE; unit->NavCom=As_Target(Cell(25,90));
+        w.Tick();
+        check(!Contains(TacticalStates[0].Ground.Members,reused),
+            "reused friendly slots are pruned before the native strike updater sees them");
+        check(unit->NavCom==As_Target(Cell(25,90)),
+            "an old model attack cannot overwrite a replacement unit's independent movement");
+        BridgeFixture::Enabled=false; Frame+=3; w.AI.AI_Update_Tactics();
+        check(unit->NavCom==As_Target(Cell(25,90)),
+            "external cancellation does not guard a replacement object");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::DEFEND_AREA,nullptr,35,80);
+        Deliver(w,plan);
+        check(LLM_Group_Controlled(&w.AI,0) && Units.Ptr(0)->NavCom==As_Target(Cell(35,80)),
+            "a model defense destination survives the native reserve and assault controllers");
+        int applied=LLMStates[0].LastApplied; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==applied,"duplicate function-call plans are consumed without re-execution");
+        BridgeFixture::Enabled=false; Frame+=3; w.AI.AI_Update_Tactics();
+        check(!LLM_Group_Controlled(&w.AI,0),"bridge disconnection releases controlled groups");
+        check(Units.Ptr(0)->NavCom==TARGET_NONE,
+            "a disconnected area directive clears its previous movement destination");
+    }
+    {
+        World w; w.Army(8); Map[Cell(35,80)].Clear=false;
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::DEFEND_AREA,nullptr,35,80); Deliver(w,plan);
+        int destination=(int)(Units.Ptr(0)->NavCom&0x7fffffffu);
+        check(LLM_Group_Controlled(&w.AI,0) && destination!=Cell(35,80) && Map[destination].Clear
+            && Distance(Cell_Coord(destination),Cell_Coord(Cell(35,80)))<=2*CELL_LEPTON_W,
+            "area orders choose a reachable nearby cell when the requested cell is occupied");
+    }
+    {
+        World w; w.Army(8); for(int y=0;y<128;++y) Map[Cell(50,y)].Clear=false;
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::DEFEND_AREA,nullptr,80,43); Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"unreachable model area orders are rejected before taking control");
+    }
+    {
+        World w; w.Army(31); w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD); Deliver(w,plan);
+        w.Tick(); plan=ModelPlan(w); Deliver(w,plan); w.Tick(false,3);
+        check(!LLM_Group_Controlled(&w.AI,0) && TacticalStates[0].Ground.Forced,
+            "an empty model plan explicitly returns every group to native control");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        plan.MatchLow+=1; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"cross-match commands are rejected");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        ModelOrder(plan,LLM::AIR,LLM::HOLD); Deliver(w,plan);
+        check(!LLM_Group_Controlled(&w.AI,0),"an invalid second order rejects the entire batch before canceling a native plan");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD); Deliver(w,plan);
+        unsigned int old=LLMMatchLow; HouseClass::AI_Tactics_Init();
+        check(LLMMatchLow!=old && LLMStates[0].History.empty() && !LLM_Group_Controlled(&w.AI,0),
+            "scenario and load resets invalidate model state and snapshot identity");
+    }
+    {
+        World w; w.Army(8);
+        auto target=w.Add<UnitClass>(w.Enemy,80,43,RTTI_UNIT,UNIT_HARVESTER,1400,false); Units.Data.push_back(target);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HARASS_ECONOMY,target,-1,-1,100); Deliver(w,plan);
+        check(TacticalStates[0].Ground.External && TacticalStates[0].Ground.Intent==STRIKE_ECONOMY
+            && TacticalStates[0].Ground.Target==target->As_Target(),
+            "model economic harassment can select a compatible enemy harvester");
+    }
+    {
+        World w; auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto jet=w.Add<AircraftClass>(w.AI,20,40,RTTI_AIRCRAFT,0,1200); Aircraft.Data.push_back(jet);
+        const_cast<TechnoTypeClass *>(jet->Class)->Speed=SPEED_WINGED;
+        const_cast<TechnoTypeClass *>(jet->Class)->IsFixedWing=true;
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::AIR,LLM::RAID_POWER,target,-1,-1,100); Deliver(w,plan);
+        check(TacticalStates[0].Air.External && TacticalStates[0].Air.Intent==STRIKE_POWER
+            && TacticalStates[0].Air.Target==target->As_Target(),
+            "a typed model air raid uses the native fixed-wing sortie controller");
+        jet->Ammo=0; jet->Mission=MISSION_ENTER; Frame+=3; w.AI.AI_Update_Tactics();
+        check(!LLM_Group_Controlled(&w.AI,LLM::AIR) && jet->Mission==MISSION_ENTER,
+            "external air raids release empty aircraft without cancelling native rearming");
+    }
+    {
+        World w; for(int y=65;y<128;++y) for(int x=0;x<128;++x) Map[Cell(x,y)].Water=true;
+        auto target=w.Building(w.Enemy,80,64,STRUCT_REFINERY);
+        for(int i=0;i<6;++i) {
+            auto ship=w.Add<VesselClass>(w.AI,20+i,70,RTTI_VESSEL,0); Vessels.Data.push_back(ship);
+            const_cast<TechnoTypeClass *>(ship->Class)->Speed=SPEED_FLOAT;
+        }
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::NAVAL,LLM::ATTACK_TARGET,target,-1,-1,100); Deliver(w,plan);
+        check(TacticalStates[0].Fleet.External && TacticalStates[0].Fleet.Members.size()==6,
+            "a model fleet attacks a reachable coastal building with native naval routes");
+        for(auto ship:Vessels.Data) ship->Strength=100;
+        Frame+=3; w.AI.AI_Update_Tactics();
+        auto const & directive=LLMStates[0].Directives[LLM::NAVAL];
+        check(directive.Active && directive.Order.ActionID==LLM::RETREAT_TO
+            && Map[Cell(directive.Order.X,directive.Order.Y)].Water,
+            "low-health model fleets retreat to their water rally instead of a land base");
+    }
+    {
+        World w; w.Army(42); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD); Deliver(w,plan);
+        w.Tank(w.Enemy,22,43); w.Tick();
+        bool reported=false;
+        for(auto const & result:LLMStates[0].Results) if(result.Status=="preempted_for_defense") reported=true;
+        check(!TacticalStates[0].Defenders.empty() && reported,
+            "native numerical superiority cannot remove emergency defenders from a model-controlled force");
+    }
 
     {
         World w; w.Army(31); auto target=w.Building(w.Enemy,80,43,STRUCT_CONST);

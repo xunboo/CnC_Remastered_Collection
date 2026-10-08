@@ -62,7 +62,7 @@ def main():
         start = source_text.index(signature)
         end = source_text.index('\n}\n', start) + 3
         implementations.append(source_text[start:end])
-    (output / 'house_decisions.inc').write_text('\n'.join(implementations), encoding='ascii')
+    (output / 'house_decisions.inc').write_text('#include "AILOG.H"\n' + '\n'.join(implementations), encoding='ascii')
     tactics = (root / 'REDALERT/AITACTICS.CPP').read_text(encoding='ascii')
     (output / 'tactics_controller.inc').write_text(tactics.replace('#include "FUNCTION.H"', '// Controlled engine fixture supplied by tactics_test.cpp.'), encoding='ascii')
     harvest = (root / 'REDALERT/HARVESTAI.CPP').read_text(encoding='ascii')
@@ -121,13 +121,14 @@ def main():
     end = factory_header.index('}', start) + 1
     (output / 'expansion_remaining_cost.inc').write_text(factory_header[start:end], encoding='ascii')
     environment = msvc_environment()
+    environment['AIBOOST_LOG'] = '0'
     selected_tests = args.test or ['ai_policy_test', 'target_selection_test', 'house_decisions_test', 'tactics_test', 'harvester_test', 'expansion_test']
     for test in selected_tests:
         executable = output / (test + '.exe')
         subprocess.run([
             environment['AI_TEST_COMPILER'], '/nologo', '/EHsc', '/W4', '/WX', '/Od', '/MT',
-            '/I' + str(output), '/I' + str(root / 'REDALERT'), '/Fo' + str(output / (test + '.obj')),
-            '/Fe' + str(executable), str(root / ('tests/' + test + '.cpp'))
+            '/I' + str(output), '/I' + str(root / 'REDALERT'), '/Fo' + str(output) + os.sep,
+            '/Fe' + str(executable), str(root / ('tests/' + test + '.cpp')), str(root / 'REDALERT/AILOG.CPP')
         ], cwd=output, env=environment, check=True)
         subprocess.run([str(executable)], cwd=output, env=environment, check=True, timeout=60)
 

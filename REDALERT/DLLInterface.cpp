@@ -32,11 +32,13 @@
 #include <vector>
 #include <set>
 
+#include "AILOGENGINE.H"
 #include	"function.h"
 #include "externs.h"
 #include "DLLInterface.h"
 #include "Gadget.h"
 #include "defines.h" // VOC_COUNT, VOX_COUNT
+#include "LLMBRIDGE.H"
 #include "SidebarGlyphx.h"
 
 #include <chrono>
@@ -1775,6 +1777,17 @@ extern "C" __declspec(dllexport) bool __cdecl CNC_Advance_Instance(uint64 player
 	/*
 	**	AI logic operations are performed here.
 	*/
+	// External decisions are permitted only in local skirmishes. GlyphX uses
+	// its multiplayer session type for single-player skirmishes too; count the
+	// original human participants so disconnects never enable online control.
+	bool llm_local_game = GAME_TO_PLAY == GAME_SKIRMISH;
+	if (GAME_TO_PLAY == GAME_GLYPHX_MULTIPLAYER) {
+		int humans = 0;
+		for (int i = 0; i < MULTIPLAYER_COUNT; ++i) if (MPlayerIsHuman[i]) ++humans;
+		llm_local_game = humans <= 1;
+	}
+	LLMBridge::Set_Local_Game(llm_local_game);
+	AILog::Simulation_Tick();
 	//Skip this block of code on first update of single-player games. This helps prevents trigger generated messages on the first update from being lost during loading screen or movie. - LLL
 	static bool FirstUpdate = GAME_TO_PLAY != GAME_GLYPHX_MULTIPLAYER;;
 	if (!FirstUpdate) {
@@ -2236,6 +2249,8 @@ void DLLExportClass::Init(void)
 **************************************************************************************************/
 void DLLExportClass::Shutdown(void)
 {
+	LLMBridge::Shutdown();
+	AILog::End(Frame, "dll_shutdown");
 	delete SpecialBackup;
 	SpecialBackup = NULL;
 
@@ -2824,6 +2839,7 @@ void DLLExportClass::On_Ping(const HouseClass* player_ptr, COORDINATE coord)
 **************************************************************************************************/
 void DLLExportClass::On_Game_Over(uint64 glyphx_Player_id, bool player_wins)
 {
+	AILog::Record(Frame, -1, "game_over", AILog::Fields().Number("player_id", glyphx_Player_id).Boolean("player_wins", player_wins));
 	if (EventCallback == NULL) {
 		return;
 	}
@@ -2906,6 +2922,7 @@ void DLLExportClass::On_Game_Over(uint64 glyphx_Player_id, bool player_wins)
 **************************************************************************************************/
 void DLLExportClass::On_Multiplayer_Game_Over(void)
 {
+	AILog::Record(Frame, -1, "multiplayer_game_over", AILog::Fields());
 	if (EventCallback == NULL) {
 		return;
 	}

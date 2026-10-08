@@ -42,6 +42,11 @@
     <ClCompile Include="AITACTICS.CPP">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="LLMBRIDGE.CPP">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AILOG.CPP"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="AILOGENGINE.CPP"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="AIRCRAFT.CPP">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -927,6 +932,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="AITACTICS.H">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LLMPROTOCOL.H">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LLMBRIDGE.H">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AILOG.H"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="LLMAUTO.INC"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="AILOGENGINE.H"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="LLMTACTICS.INC">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="AIRCRAFT.H">

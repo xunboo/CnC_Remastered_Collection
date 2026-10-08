@@ -104,6 +104,7 @@
  *   BuildingClass::~BuildingClass -- Destructor for building type objects.                    *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOGENGINE.H"
 #include	"function.h"
 
 /*
@@ -3199,6 +3200,7 @@ void BuildingClass::Grand_Opening(bool captured)
  *=============================================================================================*/
 void BuildingClass::Repair(int control)
 {
+	AILog::Object_Order(this, "building_repair_requested", static_cast<unsigned int>(control));
 	assert(Buildings.ID(this) == ID);
 	assert(IsActive);
 
@@ -3274,6 +3276,7 @@ void BuildingClass::Repair(int control)
  *=============================================================================================*/
 void BuildingClass::Sell_Back(int control)
 {
+	AILog::Object_Order(this, "building_sell_requested", static_cast<unsigned int>(control));
 	assert(Buildings.ID(this) == ID);
 	assert(IsActive);
 

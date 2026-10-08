@@ -130,6 +130,7 @@
  *   HouseClass::Random_Cell_In_Zone -- Find a (technically) legal cell in the zone specified. *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOGENGINE.H"
 #include	"function.h"
 #include	"vortex.h"
 
@@ -1046,6 +1047,7 @@ extern void Recalculate_Placement_Distances();
 
 void HouseClass::AI(void)
 {
+	AILog::HouseScope decision_log(this, "house_evaluation");
 	assert(Houses.ID(this) == ID);
 
 	// Set PlayerPtr to be this house. ST - 8/7/2019 10:12AM
@@ -2883,6 +2885,7 @@ ProdFailType HouseClass::Abandon_Production(RTTIType type)
  *=============================================================================================*/
 void HouseClass::Special_Weapon_AI(SpecialWeaponType id)
 {
+	AILog::House_Event(this, "special_weapon_evaluation", AILog::Fields().Number("weapon", id));
 	assert(Houses.ID(this) == ID);
 
 	//AI processing to be able to use Chronosphere and Iron Curtain - Mini Franki and Bast75
@@ -6707,6 +6710,8 @@ int HouseClass::AI_Base_Defense(void)
  *=============================================================================================*/
 int HouseClass::AI_Building(void)
 {
+	AILog::Choice<StructType> decision_log(Frame, IsHuman ? -1 : Class->House, "production_building", &BuildStructure,
+		AILog::Fields().Number("credits", Available_Money()).Number("power", Power).Number("drain", Drain).Boolean("pending", BuildingInProduction));
 	assert(Houses.ID(this) == ID);
 
 	//Run dynamic calculations code one time at the start of the game
@@ -7355,6 +7360,8 @@ int HouseClass::AI_Building(void)
  *=============================================================================================*/
 int HouseClass::AI_Unit(void)
 {
+	AILog::Choice<UnitType> decision_log(Frame, IsHuman ? -1 : Class->House, "production_unit", &BuildUnit,
+		AILog::Fields().Number("credits", Available_Money()).Number("units", CurUnits).Number("limit", Control.MaxUnit).Boolean("pending", UnitInProduction));
 	assert(Houses.ID(this) == ID);
 
 	if (BuildUnit != UNIT_NONE) return(TICKS_PER_SECOND);
@@ -7565,6 +7572,7 @@ int HouseClass::AI_Unit(void)
 
 int HouseClass::AI_Vessel(void)
 {
+	AILog::Choice<VesselType> decision_log(Frame, IsHuman ? -1 : Class->House, "production_vessel", &BuildVessel, AILog::Fields().Number("credits", Available_Money()));
 	assert(Houses.ID(this) == ID);
 	
 	if (BuildVessel != VESSEL_NONE) return(TICKS_PER_SECOND);
@@ -7755,6 +7763,7 @@ int HouseClass::AI_Vessel(void)
  *=============================================================================================*/
 int HouseClass::AI_Infantry(void)
 {
+	AILog::Choice<InfantryType> decision_log(Frame, IsHuman ? -1 : Class->House, "production_infantry", &BuildInfantry, AILog::Fields().Number("credits", Available_Money()));
 	assert(Houses.ID(this) == ID);
 
 	if (BuildInfantry != INFANTRY_NONE) return(TICKS_PER_SECOND);
@@ -8034,6 +8043,7 @@ int HouseClass::AI_Infantry(void)
  *=============================================================================================*/
 int HouseClass::AI_Aircraft(void)
 {
+	AILog::Choice<AircraftType> decision_log(Frame, IsHuman ? -1 : Class->House, "production_aircraft", &BuildAircraft, AILog::Fields().Number("credits", Available_Money()));
 	assert(Houses.ID(this) == ID);
 
 	if (!IsHuman && IQ >= Rule.IQAircraft) {
@@ -10472,6 +10482,8 @@ void HouseClass::AI_Calc2ndBaseLocations(void)
 
 void HouseClass::AI_StrategySwitcher(void)
 {
+	AILog::Choice<int> decision_log(Frame, IsHuman ? -1 : Class->House, "strategy_selection", &AIPersonalStrategyMode,
+		AILog::Fields().Number("configured_mode", Rule.AIStrategyMode).Boolean("naval_war", AIDetectedNavalWar).Boolean("ground_war", AIDetectHumanGroundWar));
 	assert(Houses.ID(this) == ID);
 	if (IsHuman || Session.Type == GAME_NORMAL) return;
 

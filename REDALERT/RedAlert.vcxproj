@@ -108,6 +108,9 @@
     <ClCompile Include="HARVESTAI.CPP" />
     <ClCompile Include="AIEXPANSION.CPP" />
     <ClCompile Include="AITACTICS.CPP" />
+    <ClCompile Include="LLMBRIDGE.CPP" />
+    <ClCompile Include="AILOG.CPP" />
+    <ClCompile Include="AILOGENGINE.CPP" />
     <ClCompile Include="ANIM.CPP" />
     <ClCompile Include="AUDIO.CPP" />
     <ClCompile Include="B64PIPE.CPP" />
@@ -405,6 +408,12 @@
     <ClInclude Include="HARVESTAI.H" />
     <ClInclude Include="AIEXPANSION.H" />
     <ClInclude Include="AITACTICS.H" />
+    <ClInclude Include="LLMPROTOCOL.H" />
+    <ClInclude Include="LLMBRIDGE.H" />
+    <ClInclude Include="LLMAUTO.INC" />
+    <ClInclude Include="AILOG.H" />
+    <ClInclude Include="AILOGENGINE.H" />
+    <ClInclude Include="LLMTACTICS.INC" />
     <ClInclude Include="ANIM.H" />
     <ClInclude Include="AUDIO.H" />
     <ClInclude Include="B64PIPE.H" />

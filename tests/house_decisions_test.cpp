@@ -82,6 +82,7 @@ ObjectList<TeamClass> Teams;
 ObjectList<TeamTypeClass> TeamTypes;
 ObjectList<UnitClass> Units;
 int random_calls = 0, random_offset = 0;
+int Frame = 0;
 int Random_Pick(int low, int high)
 {
     assert(high >= low);

@@ -24,6 +24,7 @@ $buildStart.WorkingDirectory = $repositoryRoot
 $outputPath = $OutputDirectory.Replace('\', '/') + '/'
 $arguments = @(
     'REDALERT/RedAlert.vcxproj', '/t:Build', '/p:Configuration=Release', '/p:Platform=Win32',
+    '/p:PreferredToolArchitecture=x64',
     ('/p:OutDir=' + $outputPath), ('/p:IntDir=' + $outputPath + 'obj/'),
     '/m:4', '/nologo', '/v:quiet', '/fl', ('/flp:logfile=' + $outputPath + 'build.log;verbosity=normal')
 )

@@ -1,10 +1,16 @@
 // Copyright 2026. Distributed under the project's GPLv3 license.
+// Read standard stream headers before the engine's legacy character macros.
+#include <sstream>
+#include <iomanip>
+#include "LLMBRIDGE.H"
+#include "AILOG.H"
 #include "FUNCTION.H"
 #include "AITACTICS.H"
 #include "AISTRATEGY.H"
 #include <algorithm>
 #include <climits>
 #include <map>
+#include <deque>
 
 namespace {
 using AITactics::Clamp;
@@ -46,12 +52,13 @@ struct StrikePlan {
     StrikeIntent Intent;
     bool Fighting;
     bool Resume;
+    bool External;
     TARGET BattleTarget;
     std::vector<TARGET> Members;
     std::vector<int> Route;
     RouteMap Field;
     StrikePlan() : Phase(STRIKE_HOLD), Target(TARGET_NONE), Enemy(-1), Home(0),
-        Waypoint(0), Step(0), ProgressFrame(0), NextAttempt(0), GatheredPower(0), TargetScore(0), RetargetFrame(0), AllOut(false), Forced(false), Intent(STRIKE_NORMAL), Fighting(false), Resume(false), BattleTarget(TARGET_NONE), Field(MAP_CELL_W, MAP_CELL_H) {}
+        Waypoint(0), Step(0), ProgressFrame(0), NextAttempt(0), GatheredPower(0), TargetScore(0), RetargetFrame(0), AllOut(false), Forced(false), Intent(STRIKE_NORMAL), Fighting(false), Resume(false), External(false), BattleTarget(TARGET_NONE), Field(MAP_CELL_W, MAP_CELL_H) {}
 };
 struct TacticalState {
     HouseClass * Owner;
@@ -80,6 +87,9 @@ struct TacticalState {
         AttackedCell(0), AttackedFrame(-1), DefenseCell(0), ThreatPower(0), AirThreat(false), DefenseReady(true) {}
 };
 TacticalState TacticalStates[HOUSE_COUNT];
+
+static bool LLM_Group_Controlled(HouseClass const * house, int group);
+static bool LLM_Has_Member(HouseClass const * house, TARGET target);
 
 static TacticalState & Tactical_State(HouseClass * house)
 {
@@ -276,10 +286,14 @@ static void Release_Formation(TARGET target, HouseClass * house)
         && !((FootClass *)object)->Team) ((FootClass *)object)->IsFormationMove = false;
 }
 
-static void Cancel(StrikePlan & plan, HouseClass * house)
+static void Cancel(StrikePlan & plan, HouseClass * house, std::vector<TARGET> const * protected_units = NULL)
 {
     bool active = plan.Phase != STRIKE_HOLD;
+    if (active) AILog::Record(Frame, house->Class->House, "strike_cancel",
+        AILog::Fields().Number("target", plan.Target).Number("members", plan.Members.size()).Number("phase", plan.Phase)
+            .Boolean("external", plan.External).Boolean("forced", plan.Forced));
     for (unsigned int i = 0; i < plan.Members.size(); ++i) {
+        if (protected_units && Contains(*protected_units, plan.Members[i])) continue;
         FootClass * unit = Member(plan.Members[i], house);
         if (unit) Guard(unit);
         else Release_Formation(plan.Members[i], house);
@@ -627,7 +641,7 @@ static int Rally_Cell(RouteMap const & field, int desired, int count)
 
 static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Fighter> const & army,
     std::vector<Contact> const & contacts, std::vector<TARGET> const & defenders, bool naval, bool air = false, bool continuing = false, bool all_out = false, int rally = -1,
-    StrikeIntent intent = STRIKE_NORMAL, bool forced = false)
+    StrikeIntent intent = STRIKE_NORMAL, bool forced = false, TARGET specified_target = TARGET_NONE, int commit_percent = 0)
 {
     if (Frame < plan.NextAttempt) return false;
     FootClass * representative = NULL;
@@ -665,7 +679,12 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     int total = 0;
     for (unsigned int i = 0; i < recruits.size(); ++i) total += recruits[i].Power;
     int reserved = 0, first = 0;
-    while (!air && !continuing && !all_out && first + 4 < (int)recruits.size() && reserved < total / 5) reserved += recruits[first++].Power;
+    if (commit_percent > 0) {
+        int keep = (int)((long long)total * (100 - commit_percent) / 100);
+        while (first < (int)recruits.size() && reserved + recruits[first].Power <= keep) reserved += recruits[first++].Power;
+    } else {
+        while (!air && !continuing && !all_out && first + 4 < (int)recruits.size() && reserved < total / 5) reserved += recruits[first++].Power;
+    }
     if (!Strike_Ready((int)recruits.size() - first, total - reserved, 0, 0, air, forced)) {
         plan.NextAttempt = Frame + TICKS_PER_SECOND * 5; return false;
     }
@@ -677,6 +696,7 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     field.Search(home);
     for (unsigned int i = 0; i < contacts.size(); ++i) {
         Contact const & contact = contacts[i];
+        if (specified_target != TARGET_NONE && contact.Object->As_Target() != specified_target) continue;
         if (contact.Air || (intent == STRIKE_POWER && !Power_Target(contact))
             || (contact.Mobile && !air && contact.Naval != naval)) continue;
         int strike = 0, count = 0;
@@ -684,16 +704,27 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
             if (Can_Hit(recruits[j].Object, contact)) { strike += recruits[j].Power; ++count; }
         }
         int cell = field.Approach(contact.Cell, air ? 1 : (naval ? 6 : 3));
-        if (cell < 0) continue;
+        if (cell < 0) {
+            AILog::Record(Frame, house->Class->House, "strike_candidate", AILog::Fields().Number("target", contact.Object->As_Target()).Text("rejection", "unreachable"));
+            continue;
+        }
         int defense = Nearby_Power(contacts, field, contact.Cell, air);
         int response = Enemy_Response(contacts, field, contact.Cell, naval, air);
-        if (!Strike_Ready(count, strike, response, defense, air, forced)
-            || (!forced && !Safe_Strike_Route(field, contacts, cell, strike, air))) continue;
+        bool ready = Strike_Ready(count, strike, response, defense, air, forced);
+        bool safe = ready && (forced || Safe_Strike_Route(field, contacts, cell, strike, air));
+        AILog::Record(Frame, house->Class->House, "strike_candidate", AILog::Fields().Number("target", contact.Object->As_Target())
+            .Number("group", air ? 2 : naval ? 1 : 0).Number("count", count).Number("power", strike).Number("defense", defense)
+            .Number("response", response).Number("distance", field.Distance[cell]).Boolean("ready", ready).Boolean("route_safe", safe));
+        if (!ready || !safe) continue;
         int score = Strike_Score(contact, intent, (std::max)(defense, response), field.Distance[cell]);
         if (!chosen || score > best) { chosen = &contact; approach = cell; best = score; }
     }
     plan.NextAttempt = Frame + TICKS_PER_SECOND * 5;
-    if (!chosen) return false;
+    if (!chosen) {
+        AILog::Record(Frame, house->Class->House, "strike_rejected", AILog::Fields().Text("reason", "no_safe_compatible_target")
+            .Number("available", available_count).Number("power", total - reserved).Boolean("forced", forced).Number("specified_target", specified_target));
+        return false;
+    }
     plan.Phase = STRIKE_RALLY;
     plan.AllOut = all_out;
     plan.Forced = forced;
@@ -711,6 +742,10 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     for (int i = first; i < (int)recruits.size(); ++i) {
         if (Can_Hit(recruits[i].Object, *chosen)) plan.Members.push_back(recruits[i].Object->As_Target());
     }
+    AILog::Record(Frame, house->Class->House, "strike_started", AILog::Fields().Number("target", plan.Target)
+        .Number("score", best).Number("home", home).Number("approach", approach).Number("members", plan.Members.size())
+        .Number("route_length", plan.Route.size()).Boolean("naval", naval).Boolean("air", air)
+        .Boolean("forced", forced).Boolean("all_out", all_out).Number("intent", intent).Number("commit_percent", commit_percent));
     if (air) {
         for (unsigned int i = 0; i < plan.Members.size(); ++i) {
             AircraftClass * aircraft = (AircraftClass *)Member(plan.Members[i], house);
@@ -727,6 +762,7 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
 static bool Retarget_Strike(StrikePlan & plan, HouseClass * house, std::vector<Contact> const & contacts,
     std::vector<TARGET> const & defenders, bool required, int current_score)
 {
+    if (plan.External) return false;
     std::vector<Fighter> survivors;
     for (unsigned int i = 0; i < plan.Members.size(); ++i) {
         FootClass * unit = Member(plan.Members[i], house);
@@ -1032,6 +1068,7 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
 static bool All_Out(TacticalState & state, HouseClass * house, std::vector<Fighter> const & army,
     std::vector<Contact> const & contacts, std::vector<TARGET> const & defenders)
 {
+    if (LLM_Group_Controlled(house, LLM::GROUND)) return false;
     if (Frame < state.NextAllOutRoll || Frame < state.NextAllOutStrike || state.ThreatPower > 0
         || state.Ground.Fighting || state.NumericalAssault) return false;
     state.NextAllOutRoll = Frame + TICKS_PER_SECOND * AITactics::AllOutRollSeconds;
@@ -1039,7 +1076,11 @@ static bool All_Out(TacticalState & state, HouseClass * house, std::vector<Fight
     for (unsigned int i = 0; i < army.size(); ++i) {
         if (!Contains(defenders, army[i].Object->As_Target()) && Main_Tank(army[i])) { ++tanks; power += army[i].Power; }
     }
-    if (!AITactics::All_Out_Ready(tanks, power) || Random_Pick(0, 99) >= AITactics::AllOutChance) return false;
+    bool ready = AITactics::All_Out_Ready(tanks, power);
+    int roll = ready ? Random_Pick(0, 99) : -1;
+    AILog::Record(Frame, house->Class->House, "all_out_roll", AILog::Fields().Number("tanks", tanks)
+        .Number("power", power).Number("roll", roll).Number("chance", AITactics::AllOutChance).Boolean("eligible", ready));
+    if (!ready || roll >= AITactics::AllOutChance) return false;
     int rally = -1;
     for (unsigned int i = 0; i < state.Ground.Members.size(); ++i) {
         FootClass * unit = Member(state.Ground.Members[i], house);
@@ -1081,11 +1122,15 @@ static bool Numerical_Assault(TacticalState & state, HouseClass * house, std::ve
     }
     if (!state.NumericalAssault) state.NextForcedAttempt = 0;
     state.NumericalAssault = true;
-    defenders.clear(); state.Defenders.clear();
+    if (!LLM_Group_Controlled(house, LLM::GROUND) && !LLM_Group_Controlled(house, LLM::NAVAL)
+        && !LLM_Group_Controlled(house, LLM::AIR)) {
+        defenders.clear(); state.Defenders.clear();
+    }
     if (Frame < state.NextForcedAttempt) return false;
     state.NextForcedAttempt = Frame + TICKS_PER_SECOND * AITactics::ForcedRetrySeconds;
     bool started = false;
     for (int kind = 0; kind < 3; ++kind) {
+        if (LLM_Group_Controlled(house, kind)) continue;
         StrikePlan & plan = kind == 0 ? state.Ground : kind == 1 ? state.Fleet : state.Air;
         bool naval = kind == 1, air = kind == 2;
         if (plan.Phase != STRIKE_HOLD && (plan.Forced || plan.Fighting)) {
@@ -1138,6 +1183,7 @@ static void Reserve_Encounter(TacticalState const & state, std::vector<Fighter> 
     if (state.ThreatPower > 0) return;
     for (unsigned int i = 0; i < army.size(); ++i) {
         TARGET member = army[i].Object->As_Target();
+        if (LLM_Has_Member(army[i].Object->House, member)) continue;
         if (army[i].Air || Contains(defenders, member) || Contains(state.Ground.Members, member)
             || Contains(state.Fleet.Members, member) || Contains(state.Air.Members, member)) continue;
         std::vector<Fighter> single(1, army[i]); TARGET target = TARGET_NONE;
@@ -1151,6 +1197,7 @@ static void Hold_Reserve(HouseClass * house, std::vector<Fighter> const & army, 
     for (unsigned int i = 0; i < army.size(); ++i) {
         Fighter const & fighter = army[i];
         TARGET target = fighter.Object->As_Target();
+        if (LLM_Has_Member(house, target)) continue;
         if (Contains(defenders, target) || Contains(state.Ground.Members, target) || Contains(state.Fleet.Members, target) || Contains(state.Air.Members, target)) continue;
         if (fighter.Air) {
             if (state.ThreatPower == 0 && state.Ground.Phase != STRIKE_ENGAGE && state.Fleet.Phase != STRIKE_ENGAGE) Guard(fighter.Object);
@@ -1177,6 +1224,7 @@ static void Air_Support(HouseClass * house, TacticalState const & state, std::ve
         : state.Fleet.Phase == STRIKE_ENGAGE ? state.Fleet.Target : TARGET_NONE;
     for (int i = 0; i < Aircraft.Count(); ++i) {
         AircraftClass * aircraft = Aircraft.Ptr(i);
+        if (LLM_Has_Member(house, aircraft->As_Target()) && state.ThreatPower == 0) continue;
         if (!Alive(aircraft) || (HouseClass const *)aircraft->House != house || aircraft->Team || !Armed(aircraft)
             || aircraft->Ammo == 0 || aircraft->Mission == MISSION_ENTER
             || (aircraft->Height == 0 && aircraft->Class->MaxAmmo > 0 && aircraft->Ammo < aircraft->Class->MaxAmmo)
@@ -1198,6 +1246,8 @@ static void Air_Support(HouseClass * house, TacticalState const & state, std::ve
     }
 }
 
+#include "LLMTACTICS.INC"
+
 } // namespace
 
 void HouseClass::AI_Replan_Attack(void)
@@ -1209,6 +1259,8 @@ void HouseClass::AI_Replan_Attack(void)
 void HouseClass::AI_Tactics_Init(void)
 {
     for (int i = 0; i < HOUSE_COUNT; ++i) TacticalStates[i] = TacticalState();
+    LLM_Reset();
+    AILog::Prepare(LLMMatchLow, LLMMatchHigh, Frame, "scenario_reset_or_load");
 }
 
 void HouseClass::AI_Tactical_Attacked(BuildingClass const * building)
@@ -1231,6 +1283,7 @@ bool HouseClass::AI_Update_Tactics(void)
             int friendly_count = 0, enemy_count = 0;
             Gather(this, army, contacts, &friendly_count, &enemy_count);
             std::vector<TARGET> defenders = state.Defenders;
+            LLM_Tick(this, state, army, contacts, defenders);
             if (Numerical_Assault(state, this, army, contacts, defenders,
                 AITactics::Numerical_Advantage(friendly_count, enemy_count))) {
                 Update_Strike(state.Ground, this, contacts, defenders, false);
@@ -1255,10 +1308,18 @@ bool HouseClass::AI_Update_Tactics(void)
     int friendly_count = 0, enemy_count = 0;
     Gather(this, army, contacts, &friendly_count, &enemy_count);
     bool numerical = AITactics::Numerical_Advantage(friendly_count, enemy_count);
+    AILog::Record(Frame, Class->House, "tactics_evaluation", AILog::Fields().Number("friendly_combat_count", friendly_count)
+        .Number("enemy_combat_count", enemy_count).Number("available", army.size()).Number("contacts", contacts.size())
+        .Boolean("numerical_advantage", numerical).Boolean("opportunity_scan", scan)
+        .Number("ground_phase", state.Ground.Phase).Number("naval_phase", state.Fleet.Phase).Number("air_phase", state.Air.Phase));
     Defend(state, this, army, contacts, defenders);
+    AILog::Record(Frame, Class->House, "defense_decision", AILog::Fields().Number("defense_cell", state.DefenseCell)
+        .Number("threat_power", state.ThreatPower).Number("defender_count", defenders.size()).Boolean("air_threat", state.AirThreat)
+        .Boolean("defense_ready", state.DefenseReady));
     state.Defenders = defenders;
+    LLM_Tick(this, state, army, contacts, defenders);
     bool forced_started = Numerical_Assault(state, this, army, contacts, defenders, numerical);
-    if (!state.Ground.Forced)
+    if (!state.Ground.Forced && !LLM_Group_Controlled(this, LLM::GROUND))
         state.Ground.Intent = Tank_Count(army) > AITactics::EconomyRaidTanks ? STRIKE_ECONOMY : STRIKE_NORMAL;
     Defender_Encounter(army, contacts, defenders);
     Update_Strike(state.Ground, this, contacts, defenders, scan);
@@ -1272,14 +1333,14 @@ bool HouseClass::AI_Update_Tactics(void)
     }
     bool started = !numerical && economy && Frame > TICKS_PER_MINUTE && All_Out(state, this, army, contacts, defenders);
     if (!numerical && !started && scan && economy && state.DefenseReady && Frame > TICKS_PER_MINUTE && Frame >= state.NextAttack) {
-        if (state.Ground.Phase == STRIKE_HOLD)
+        if (state.Ground.Phase == STRIKE_HOLD && !LLM_Group_Controlled(this, LLM::GROUND))
             started |= Start_Strike(state.Ground, this, army, contacts, defenders, false, false, false, false, -1,
                 Tank_Count(army) > AITactics::EconomyRaidTanks ? STRIKE_ECONOMY : STRIKE_NORMAL);
-        if (state.Fleet.Phase == STRIKE_HOLD) started |= Start_Strike(state.Fleet, this, army, contacts, defenders, true);
+        if (state.Fleet.Phase == STRIKE_HOLD && !LLM_Group_Controlled(this, LLM::NAVAL)) started |= Start_Strike(state.Fleet, this, army, contacts, defenders, true);
     }
     bool air_started = false;
     if (!numerical && scan && economy && state.DefenseReady && Frame > TICKS_PER_MINUTE
-        && Frame >= state.NextAirRaid && state.Air.Phase == STRIKE_HOLD) {
+        && Frame >= state.NextAirRaid && state.Air.Phase == STRIKE_HOLD && !LLM_Group_Controlled(this, LLM::AIR)) {
         state.NextAirRaid = Frame + TICKS_PER_SECOND * AITactics::AirRaidSeconds;
         StrikePlan raid;
         air_started = Start_Strike(raid, this, army, contacts, defenders, false, true, false, false, -1, STRIKE_POWER);

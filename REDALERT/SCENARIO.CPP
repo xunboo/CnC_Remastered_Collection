@@ -59,6 +59,7 @@
  *   ScenarioClass::Do_Fade_AI -- Process the palette fading effect.                           *
  * - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#include "AILOG.H"
 #include	"function.h"
 #ifdef WIN32
 #include "tcpip.h"
@@ -730,6 +731,9 @@ void Fill_In_Data(void)
  *=============================================================================================*/
 void Post_Load_Game(int load_multi)
 {
+	// External plans and object identities belong to the pre-load world.
+	HouseClass::AI_Tactics_Init();
+	AILog::Start_Reason("load_game");
 	Map.Set_View_Dimensions(0, 0, Map.MapCellWidth, Map.MapCellHeight);
 	//
 	// Do NOT call Overpass if we're loading a multiplayer game; it calls the

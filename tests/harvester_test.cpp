@@ -72,6 +72,8 @@ CELL As_Cell(TARGET t) {
 }
 class HouseClass {
 public:
+    struct ClassFixture { int House = 0; } OwnClass;
+    ClassFixture * Class = &OwnClass;
     bool IsHuman=false, Allied=false, IsTiberiumShort=false;
     int ActiveBScan=STRUCTF_REFINERY|STRUCTF_CONST, Capacity=1000, Tiberium=0;
     bool Is_Ally(TechnoClass const * other) const { return other->House==this || (other->House && other->House->Allied); }
