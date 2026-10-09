@@ -28,7 +28,14 @@ inline bool Economy_Ready(int refineries, int harvesters, bool ore_exhausted)
 enum { ContactTicks = 3, AllOutTanks = 20, AllOutRollSeconds = 30,
     AllOutChance = 25, AllOutCooldownMinutes = 3, NumericalLead = 30,
     EconomyRaidTanks = 20, OpportunitySeconds = 2, RetargetSeconds = 6,
-    AirRaidSeconds = 8, ForcedRetrySeconds = 3 };
+    AirRaidSeconds = 8, ForcedRetrySeconds = 3, SmallEnemyMaximum = 6,
+    OpportunityMinimum = 8, SmallRaidMaximum = 3, MarchBatchSize = 12 };
+
+inline bool Small_Enemy_Opportunity(int available, int enemy)
+{
+    return enemy >= 0 && enemy <= SmallEnemyMaximum && available >= OpportunityMinimum
+        && (long long)available >= (long long)enemy * 2;
+}
 
 inline bool Numerical_Advantage(int friendly, int enemy)
 {
@@ -64,9 +71,22 @@ inline bool Cohesion_Ready(int count, int ready_count, int power, int ready_powe
         && (long long)ready_power * 100 >= (long long)power * 80;
 }
 
+inline bool March_Batch_Ready(int members, int ready, int power)
+{
+    // A forced remnant can still move, but a larger army must send a useful
+    // combat group rather than let one fast scout pull the whole column.
+    return members > 0 && ready >= (members < 4 ? members : 4)
+        && power >= (members < 4 ? 1 : 2000);
+}
+
 inline bool Defense_Sufficient(int defenders, int threat)
 {
     return threat > 0 && (long long)defenders * 100 >= (long long)threat * 125;
+}
+
+inline bool Raid_Defense_Sufficient(int defenders, int threat, bool small_raid)
+{
+    return threat > 0 && (long long)defenders * 100 >= (long long)threat * (small_raid ? 110 : 125);
 }
 
 inline int Weak_Point_Score(int value, int defenders, int route_length)

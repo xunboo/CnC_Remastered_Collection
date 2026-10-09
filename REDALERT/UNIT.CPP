@@ -2562,7 +2562,8 @@ int UnitClass::Tiberium_Check(CELL & center, int x, int y)
 
 	if ((Session.Type != GAME_NORMAL || (!IsOwnedByPlayer || Map[center].Is_Mapped(PlayerPtr)))) {
 		if (Map[Coord].Zones[Class->MZone] != Map[center].Zones[Class->MZone]) return(0);
-		if (!Map[center].Cell_Techno() && Map[center].Land_Type() == LAND_TIBERIUM) {
+		TechnoClass const * occupant = Map[center].Cell_Techno();
+		if ((!occupant || (Rule.HarvesterOptimizeEnabled && occupant == this)) && Map[center].Land_Type() == LAND_TIBERIUM) {
 			int value = 0;
 			switch (Map[center].Overlay) {
 				case OVERLAY_GOLD1:

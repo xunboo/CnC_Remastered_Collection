@@ -7,6 +7,7 @@ to include the compiled tactical-controller integration fixture.
 from pathlib import Path
 import copy
 from dataclasses import replace
+from datetime import datetime, timezone
 import io
 import json
 import mmap
@@ -32,7 +33,7 @@ OUTPUT = ROOT / "build/ai-tests"
 
 def snapshot():
     return {
-        "protocol_version": 1, "match_id": "12345678abcdef01", "snapshot_seq": 7,
+        "protocol_version": bridge.PROTOCOL_VERSION, "match_id": "12345678abcdef01", "snapshot_seq": 7,
         "sim_frame": 901, "controlled_house_id": 4, "visibility_mode": "omniscient",
         "ticks_per_second": 15, "map_bounds": {"x": 1, "y": 1, "width": 126, "height": 126},
         "self": {"credits": 5000, "power": 300, "drain": 200, "base_cell": [20, 40]},
@@ -98,6 +99,16 @@ class IniConfiguration(unittest.TestCase):
                 with self.assertRaises(ConfigError):
                     live.wait_for_config(self.path, 0)
                 transport.assert_not_called()
+
+    def test_network_and_execution_budgets_are_independent_ini_options(self):
+        self.write("[llm]\nauthorization = Bearer test-only\ntimeout = 75\nplan_ttl_seconds = 12\n")
+        config = load_config(self.path)
+        self.assertEqual(config.timeout, 75)
+        self.assertEqual(bridge.plan_tick_limit(config), 180)
+        for value in ("0", "31", "true", "12.5"):
+            self.write("[llm]\nauthorization = Bearer test-only\nplan_ttl_seconds = " + value + "\n")
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                load_config(self.path)
 
     def test_waits_for_saved_configuration_before_returning(self):
         self.write("[llm]\nauthorization =\n")
@@ -275,6 +286,11 @@ class LiveTestHarness(unittest.TestCase):
                                        OUTPUT / "tactics_test.exe", requester=fake_request)
                 self.assertTrue(result["passed"], result)
                 self.assertTrue(result["cpp_execution_passed"])
+                entry = result["attempts"][0]
+                times = [datetime.fromisoformat(value) for value in
+                         (result["started_at"], entry["started_at"], entry["completed_at"], result["completed_at"])]
+                self.assertTrue(all(value.tzinfo == timezone.utc for value in times))
+                self.assertEqual(times, sorted(times))
                 self.assertNotIn("test-only", json.dumps(result))
 
     @unittest.skipUnless((OUTPUT / "tactics_test.exe").is_file(), "compile the tactical fixture first")
@@ -285,6 +301,8 @@ class LiveTestHarness(unittest.TestCase):
                                OUTPUT / "tactics_test.exe", requester=failed_request)
         self.assertFalse(result["passed"])
         self.assertEqual(len(result["attempts"]), 1)
+        self.assertIn("completed_at", result["attempts"][0])
+        self.assertIn("completed_at", result)
         self.assertNotIn("cpp_execution_passed", result)
 
 
@@ -311,7 +329,7 @@ class FunctionCalls(unittest.TestCase):
         packet = bridge.encode_plan(plan, self.snapshot)
         self.assertEqual(len(packet), 96)
         self.assertEqual(struct.unpack_from("<IIIIiiii", packet),
-                         (bridge.PLAN_MAGIC, 1, 0xABCDEF01, 0x12345678, 7, 4, 1351, 2))
+                         (bridge.PLAN_MAGIC, bridge.PROTOCOL_VERSION, 0xABCDEF01, 0x12345678, 7, 4, 450, 2))
         self.assertEqual(struct.unpack_from("<iiIIiiii", packet, 32),
                          (0, 1, 16777224, 2, -1, -1, 75, 35))
         self.plan["orders"] = []
@@ -344,9 +362,10 @@ class FunctionCalls(unittest.TestCase):
 
     def test_envelope_staleness_and_strict_fields(self):
         changes = {
-            "protocol_version": [True, 2], "match_id": ["0000000000000000"],
+            "protocol_version": [True, 1], "match_id": ["0000000000000000"],
             "based_on_snapshot_seq": [6, True], "controlled_house_id": [3, True],
-            "expires_at_frame": [901, 1352, True], "orders": [None, self.plan["orders"] * 2],
+            "valid_for_ticks": [0, 451, True], "orders": [None, self.plan["orders"] * 2],
+            "expires_at_frame": [1351],
             "unexpected": [1],
         }
         for key, values in changes.items():
@@ -448,6 +467,92 @@ class FunctionCalls(unittest.TestCase):
                 child.communicate()
 
 
+class RequestBudgets(unittest.TestCase):
+    def setUp(self):
+        self.snapshot = snapshot()
+        self.plan = bridge.mock_plan(self.snapshot, "attack_target")
+        self.config = APIConfig(authorization="Bearer test-only")
+
+    def test_empty_groups_never_open_http_transport(self):
+        for group in self.snapshot["groups"]:
+            group.update(count=0, units=[])
+        with patch.object(bridge, "open_api") as transport:
+            with self.assertRaisesRegex(bridge.BridgeError, "no available combat groups"):
+                bridge.request_plan(self.snapshot, config=self.config)
+            transport.assert_not_called()
+
+    def test_slow_reply_survives_accelerated_simulation_within_network_budget(self):
+        latest = copy.deepcopy(self.snapshot)
+        latest["snapshot_seq"] += 200
+        latest["sim_frame"] += 3000
+        self.assertIsNone(bridge.submission_rejection(self.plan, self.snapshot, latest,
+                          elapsed=52, snapshot_age=0.05, config=self.config))
+        self.assertEqual(self.plan["based_on_snapshot_seq"], self.snapshot["snapshot_seq"])
+        self.assertEqual(self.plan["valid_for_ticks"], 450)
+
+    def test_late_or_outdated_responses_and_lost_groups_are_rejected(self):
+        cases = [(61, 0, {}, "network_wait_budget_exceeded"),
+                 (52, 5, {}, "game_snapshot_stale"),
+                 (52, 0, {"match_id": "0000000000000001"}, "match_or_house_changed"),
+                 (52, 0, {"controlled_house_id": 5}, "match_or_house_changed"),
+                 (52, 0, {"sim_frame": 900}, "game_snapshot_stale"),
+                 (52, 0, {"snapshot_seq": 6}, "game_snapshot_stale")]
+        for elapsed, age, changes, reason in cases:
+            latest = dict(self.snapshot, **changes)
+            with self.subTest(reason=reason, changes=changes):
+                self.assertEqual(bridge.submission_rejection(self.plan, self.snapshot, latest,
+                                 elapsed=elapsed, snapshot_age=age, config=self.config), reason)
+        latest = copy.deepcopy(self.snapshot)
+        for group in latest["groups"]:
+            group.update(count=0, units=[])
+        self.assertEqual(bridge.submission_rejection(self.plan, self.snapshot, latest,
+                         elapsed=52, snapshot_age=0, config=self.config), "no_available_combat_groups")
+
+    def test_configured_execution_lifetime_is_enforced_in_schema_and_response(self):
+        config = replace(self.config, plan_ttl_seconds=10)
+        body = json.loads(bridge.build_request(self.snapshot, config).data)
+        duration = body["tools"][0]["function"]["parameters"]["properties"]["valid_for_ticks"]
+        self.assertEqual((duration["minimum"], duration["maximum"]), (1, 150))
+        with patch.object(bridge, "open_api", return_value=io.BytesIO(json.dumps(chat_response(self.plan)).encode())):
+            with self.assertRaisesRegex(bridge.BridgeError, "invalid plan lifetime"):
+                bridge.request_plan(self.snapshot, config=config)
+        valid = bridge.mock_plan(self.snapshot, max_plan_ticks=bridge.plan_tick_limit(config))
+        self.assertIsNone(bridge.submission_rejection(valid, self.snapshot, self.snapshot,
+                          elapsed=52, snapshot_age=0, config=config))
+
+    def test_http_body_wait_uses_total_network_budget(self):
+        for timeout, passes in ((60, True), (30, False)):
+            clock = [100.0]
+            class SlowBody(io.BytesIO):
+                waited = False
+                def read1(body, length):
+                    if not body.waited:
+                        body.waited = True
+                        clock[0] += 52
+                    return super().read1(length)
+            response = SlowBody(json.dumps(chat_response(self.plan)).encode())
+            with self.subTest(timeout=timeout), patch.object(bridge.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(bridge, "open_api", return_value=response):
+                if passes:
+                    self.assertEqual(bridge.request_plan(self.snapshot, config=replace(self.config, timeout=timeout)), self.plan)
+                else:
+                    with self.assertRaisesRegex(bridge.BridgeError, "network wait budget"):
+                        bridge.request_plan(self.snapshot, config=replace(self.config, timeout=timeout))
+
+    def test_slow_streaming_cannot_reset_the_total_wait_budget(self):
+        clock = [0.0]
+        response = unittest.mock.Mock()
+        chunks = iter([b"first", b"second"])
+        def read(length):
+            clock[0] += 3
+            return next(chunks)
+        response.read1.side_effect = read
+        with patch.object(bridge.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(bridge.BridgeError, "network wait budget"):
+                bridge.read_api_response(response, 5)
+        self.assertEqual([call.args[0] for call in response.fp.raw._sock.settimeout.call_args_list], [5, 2])
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows shared memory integration")
 class NativeTransport(unittest.TestCase):
     @classmethod
@@ -505,7 +610,7 @@ class NativeTransport(unittest.TestCase):
             packet(binary, declared_length=-1)
             self.assertEqual(command("receive"), "invalid")
             malformed = bytearray(binary)
-            struct.pack_into("<I", malformed, 4, 2)
+            struct.pack_into("<I", malformed, 4, 1)  # Reject the old absolute-expiry protocol.
             packet(malformed)
             self.assertEqual(command("receive"), "invalid")
             malformed = bytearray(binary)
@@ -537,15 +642,24 @@ class NativeTransport(unittest.TestCase):
                 child.communicate()
             channel.close()
 
-    def test_real_mock_bridge_process_reads_native_snapshot_and_sends_plan(self):
+    def test_real_mock_bridge_process_pauses_and_resumes_with_combat_units(self):
         exported = snapshot()
+        empty = copy.deepcopy(exported)
+        for group in empty["groups"]:
+            group.update(count=0, units=[])
+        empty["target_candidates"] = []
         path = OUTPUT / "llm-cli-snapshot.json"
-        path.write_text(json.dumps(exported), encoding="ascii")
+        path.write_text(json.dumps(empty), encoding="ascii")
+        directory = tempfile.TemporaryDirectory(dir=OUTPUT)
+        self.addCleanup(directory.cleanup)
+        config = Path(directory.name) / "llm.ini"
+        config.write_text("[llm]\napi_url = https://example.invalid/v1/chat/completions\n"
+                          "model = mock-test\nreasoning_effort =\n", encoding="ascii")
         name = "cli_" + uuid.uuid4().hex
         log = OUTPUT / (name + ".jsonl")
         memory = mmap.mmap(-1, bridge.MAPPING_BYTES, tagname="Local\\AIBoostLLM-" + name, access=mmap.ACCESS_WRITE)
         worker = subprocess.Popen([
-            sys.executable, str(ROOT / "SCRIPTS/llm_bridge.py"), "--mock", "--mock-action", "attack_target",
+            sys.executable, str(ROOT / "SCRIPTS/llm_bridge.py"), "--config", str(config), "--mock", "--mock-action", "attack_target",
             "--channel", name, "--house", "4", "--interval", "1", "--log", str(log),
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         native = None
@@ -565,18 +679,43 @@ class NativeTransport(unittest.TestCase):
             native = subprocess.Popen([str(self.executable), str(path)], cwd=OUTPUT, env=environment,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.assertEqual(native.stdout.readline().strip(), "ready")
+            wait_until(lambda: log.exists() and '"snapshot_seq": 7' in log.read_text(encoding="utf-8"))
+            time.sleep(1.2)
+            self.assertEqual(struct.unpack_from("<I", memory, 16)[0], 0, "empty groups must not generate a request")
+            def publish(data):
+                native.stdin.write("publish " + json.dumps(data) + "\n")
+                native.stdin.flush()
+                self.assertEqual(native.stdout.readline().strip(), "published")
+            exported.update(snapshot_seq=8, sim_frame=916)
+            publish(exported)
             wait_until(lambda: struct.unpack_from("<I", memory, 16)[0] > 0
+                       and not struct.unpack_from("<I", memory, 16)[0] & 1)
+            native.stdin.write("receive\n")
+            native.stdin.flush()
+            self.assertEqual(native.stdout.readline().strip(), "8:2:16777224:2")
+            first_command = struct.unpack_from("<I", memory, 16)[0]
+            empty.update(snapshot_seq=9, sim_frame=931)
+            publish(empty)
+            wait_until(lambda: '"snapshot_seq": 9' in log.read_text(encoding="utf-8"))
+            time.sleep(1.2)
+            self.assertEqual(struct.unpack_from("<I", memory, 16)[0], first_command)
+            exported.update(snapshot_seq=10, sim_frame=946)
+            publish(exported)
+            wait_until(lambda: struct.unpack_from("<I", memory, 16)[0] > first_command
                        and not struct.unpack_from("<I", memory, 16)[0] & 1)
             native.stdin.write("receive\nquit\n")
             native.stdin.flush()
             output, errors = native.communicate(timeout=10)
             self.assertEqual(native.returncode, 0, errors)
-            self.assertEqual(output.strip(), "7:2:16777224:2")
-            wait_until(lambda: log.exists() and '"kind": "plan"' in log.read_text(encoding="utf-8"))
+            self.assertEqual(output.strip(), "10:2:16777224:2")
+            wait_until(lambda: '"based_on_snapshot_seq": 10' in log.read_text(encoding="utf-8"))
             records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(records[0]["kind"], "snapshot")
-            self.assertEqual(records[0]["data"], exported)
-            self.assertTrue(any(record["kind"] == "plan" for record in records))
+            self.assertEqual(records[0]["data"]["snapshot_seq"], 7)
+            self.assertFalse(bridge.has_combat_groups(records[0]["data"]))
+            self.assertEqual([record["data"]["based_on_snapshot_seq"] for record in records if record["kind"] == "plan"], [8, 10])
+            for record in records:
+                self.assertEqual(datetime.fromisoformat(record["timestamp"]).tzinfo, timezone.utc)
         finally:
             if native is not None and native.poll() is None:
                 native.kill()

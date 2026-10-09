@@ -20,9 +20,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from llm_config import APIConfig, BridgeConfig, ConfigError, DEFAULT_CONFIG, load_bridge_config, load_config, validate_config
-from llm_audit import MatchAudit
+from llm_audit import MatchAudit, log_status, utc_timestamp
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAPPING_MAGIC = 0x314D4C41
 MAPPING_VERSION = 2
 PLAN_MAGIC = 0x314E4C50
@@ -33,10 +33,11 @@ LOG_PATH_BYTES = 4096
 LOG_PATH_OFFSET = HEADER_BYTES + SNAPSHOT_BYTES + COMMAND_BYTES
 MAPPING_BYTES = LOG_PATH_OFFSET + LOG_PATH_BYTES
 MAX_PLAN_TICKS = 450
+SIM_TICKS_PER_SECOND = 15
 GROUPS = ("ground", "naval", "air")
 ACTIONS = ("hold", "attack_target", "defend_area", "retreat_to", "harass_economy", "raid_power")
 TARGET_ACTIONS = {"attack_target", "harass_economy", "raid_power"}
-PLAN_KEYS = {"protocol_version", "match_id", "based_on_snapshot_seq", "controlled_house_id", "expires_at_frame", "orders"}
+PLAN_KEYS = {"protocol_version", "match_id", "based_on_snapshot_seq", "controlled_house_id", "valid_for_ticks", "orders"}
 ORDER_KEYS = {"action", "group_id", "target_id", "destination_cell", "commit_percent", "withdraw_avg_hp_percent"}
 
 SYSTEM_PROMPT = """You are the tactical commander of one computer-controlled army in
@@ -60,8 +61,10 @@ one order per group. This plan replaces the previous plan; omitted groups return
 to native control. An empty orders array returns all groups to native control.
 Prefer stable plans, avoid unnecessary reversals, and consider active_plan and
 last_plan_results. Do not assign orders to groups with no available units.
-Set expires_at_frame between sim_frame+1 and sim_frame+450 (30 simulation seconds).
-The game continues while this request runs. Reserve enough time for API latency.
+Set valid_for_ticks within the supplied schema's limits (at most 450 ticks, or
+30 simulation seconds). It starts when the DLL accepts the plan, independently
+of the network wait budget. The game continues during the request, and the DLL
+rechecks live targets, object generations, current routes and force safety.
 The snapshot is omniscient AI-debug data; it is not a human player's view.
 """
 
@@ -100,6 +103,8 @@ def validate_snapshot(snapshot):
             raise BridgeError("invalid snapshot envelope")
     if snapshot.get("visibility_mode") != "omniscient":
         raise BridgeError("this bridge requires omniscient AI-debug snapshots")
+    if type(snapshot.get("ticks_per_second")) is not int or snapshot["ticks_per_second"] != SIM_TICKS_PER_SECOND:
+        raise BridgeError("unsupported simulation tick rate")
     if not isinstance(snapshot.get("groups"), list) or not isinstance(snapshot.get("target_candidates"), list):
         raise BridgeError("missing tactical data")
     bounds = snapshot.get("map_bounds")
@@ -130,13 +135,22 @@ def validate_snapshot(snapshot):
     return snapshot
 
 
-def function_tool(snapshot=None):
+def has_combat_groups(snapshot):
+    return any(group["count"] > 0 for group in snapshot["groups"])
+
+
+def plan_tick_limit(config):
+    return config.plan_ttl_seconds * SIM_TICKS_PER_SECOND
+
+
+def function_tool(snapshot=None, max_plan_ticks=MAX_PLAN_TICKS):
     envelope = {
         "protocol_version": {"type": "integer", "enum": [PROTOCOL_VERSION]},
         "match_id": {"type": "string"},
         "based_on_snapshot_seq": {"type": "integer"},
         "controlled_house_id": {"type": "integer"},
-        "expires_at_frame": {"type": "integer"},
+        "valid_for_ticks": {"type": "integer", "minimum": 1, "maximum": max_plan_ticks,
+                            "description": "Simulation ticks from DLL acceptance, independent of API latency."},
         "orders": {
             "type": "array", "maxItems": 3,
             "items": {
@@ -157,8 +171,6 @@ def function_tool(snapshot=None):
         envelope["match_id"]["enum"] = [snapshot["match_id"]]
         envelope["based_on_snapshot_seq"]["enum"] = [snapshot["snapshot_seq"]]
         envelope["controlled_house_id"]["enum"] = [snapshot["controlled_house_id"]]
-        envelope["expires_at_frame"].update(minimum=snapshot["sim_frame"] + 1,
-                                             maximum=min(2147483647, snapshot["sim_frame"] + MAX_PLAN_TICKS))
         groups = [group["id"] for group in snapshot["groups"] if group["count"]]
         if groups:
             envelope["orders"]["items"]["properties"]["group_id"]["enum"] = groups
@@ -173,7 +185,7 @@ def function_tool(snapshot=None):
     }
 
 
-def validate_plan(plan, snapshot):
+def validate_plan(plan, snapshot, max_plan_ticks=MAX_PLAN_TICKS):
     validate_snapshot(snapshot)
     if not isinstance(plan, dict) or set(plan) != PLAN_KEYS:
         raise BridgeError("invalid plan fields")
@@ -182,8 +194,7 @@ def validate_plan(plan, snapshot):
     for key, snapshot_key in (("match_id", "match_id"), ("based_on_snapshot_seq", "snapshot_seq"), ("controlled_house_id", "controlled_house_id")):
         if type(plan[key]) is not type(snapshot[snapshot_key]) or plan[key] != snapshot[snapshot_key]:
             raise BridgeError("plan does not match the requested snapshot")
-    if not _integer(plan["expires_at_frame"], snapshot["sim_frame"] + 1,
-                    min(2147483647, snapshot["sim_frame"] + MAX_PLAN_TICKS)):
+    if not _integer(plan["valid_for_ticks"], 1, max_plan_ticks):
         raise BridgeError("invalid plan lifetime")
     orders = plan["orders"]
     if not isinstance(orders, list) or len(orders) > 3:
@@ -236,7 +247,7 @@ def encode_plan(plan, snapshot):
     match = int(plan["match_id"], 16)
     packet = struct.pack("<IIIIiiii", PLAN_MAGIC, PROTOCOL_VERSION, match & 0xFFFFFFFF,
                          match >> 32, plan["based_on_snapshot_seq"], plan["controlled_house_id"],
-                         plan["expires_at_frame"], len(plan["orders"]))
+                         plan["valid_for_ticks"], len(plan["orders"]))
     for order in plan["orders"]:
         target, generation = (int(value) for value in order["target_id"].split(":")) if order["target_id"] else (0, 0)
         if target > 0xFFFFFFFF or generation > 0xFFFFFFFF:
@@ -300,7 +311,7 @@ def extract_chat_plan(response, snapshot):
 def build_request(snapshot, config, instructions=SYSTEM_PROMPT):
     validate_config(config)
     validate_snapshot(snapshot)
-    tool = function_tool(snapshot)
+    tool = function_tool(snapshot, plan_tick_limit(config))
     content = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True)
     if config.protocol == "chat_completions":
         function = {key: value for key, value in tool.items() if key != "type"}
@@ -340,6 +351,27 @@ def open_api(request, timeout):
     return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
 
 
+def read_api_response(response, deadline):
+    payload = bytearray()
+    read = getattr(response, "read1", response.read)
+    while len(payload) <= 1048576:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BridgeError("API response exceeded network wait budget")
+        # urllib's HTTPResponse wraps a socket in a buffered reader. Bound each
+        # read by the remaining total budget, including a slowly streamed body.
+        socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if socket is not None:
+            socket.settimeout(remaining)
+        chunk = read(min(65536, 1048577 - len(payload)))
+        if time.monotonic() > deadline:
+            raise BridgeError("API response exceeded network wait budget")
+        if not chunk:
+            break
+        payload.extend(chunk)
+    return bytes(payload)
+
+
 def request_plan(snapshot, model=None, api_key=None, base_url=None, timeout=None,
                  *, config=None, instructions=SYSTEM_PROMPT, metadata=None, audit=None):
     # Preserve the original Responses helper's positional interface.
@@ -347,13 +379,18 @@ def request_plan(snapshot, model=None, api_key=None, base_url=None, timeout=None
         config = APIConfig(protocol="responses", api_url=(base_url or "https://api.openai.com/v1").rstrip("/") + "/responses",
                            model=model or "", authorization="Bearer " + (api_key or ""), strict=True,
                            reasoning_effort="", max_output_tokens=1536, timeout=timeout or 20)
+    validate_snapshot(snapshot)
+    if not has_combat_groups(snapshot):
+        raise BridgeError("no available combat groups; API request paused")
     request = build_request(snapshot, config, instructions)
     if audit:
         audit.record("llm_request", {"protocol": config.protocol, "endpoint": config.api_url,
-            "model": config.model, "request_body": parse_json(request.data)})
+            "model": config.model, "network_wait_seconds": config.timeout,
+            "plan_ttl_seconds": config.plan_ttl_seconds, "request_body": parse_json(request.data)})
+    started_at = time.monotonic()
     try:
         with open_api(request, config.timeout) as response:
-            payload = response.read(1048577)
+            payload = read_api_response(response, started_at + config.timeout)
         if audit:
             try:
                 body = parse_json(payload)
@@ -362,10 +399,13 @@ def request_plan(snapshot, model=None, api_key=None, base_url=None, timeout=None
             audit.record("llm_response", {"response_body": body, "exceeds_limit": len(payload) > 1048576})
         if len(payload) > 1048576:
             raise BridgeError("API response exceeds limit")
+        if time.monotonic() - started_at > config.timeout:
+            raise BridgeError("API response exceeded network wait budget")
         response = parse_json(payload)
         if config.protocol == "chat_completions":
             response = unwrap_chat_response(response)
         plan = extract_chat_plan(response, snapshot) if config.protocol == "chat_completions" else extract_plan(response, snapshot)
+        validate_plan(plan, snapshot, plan_tick_limit(config))
         if audit:
             audit.record("llm_plan_validated", {"plan": plan})
         if metadata is not None:
@@ -397,7 +437,7 @@ def request_plan(snapshot, model=None, api_key=None, base_url=None, timeout=None
         raise
 
 
-def mock_plan(snapshot, action="hold"):
+def mock_plan(snapshot, action="hold", max_plan_ticks=MAX_PLAN_TICKS):
     orders = []
     for group in snapshot["groups"]:
         if not group["count"]:
@@ -409,7 +449,22 @@ def mock_plan(snapshot, action="hold"):
                        "commit_percent": 75, "withdraw_avg_hp_percent": 35})
     return {"protocol_version": PROTOCOL_VERSION, "match_id": snapshot["match_id"],
             "based_on_snapshot_seq": snapshot["snapshot_seq"], "controlled_house_id": snapshot["controlled_house_id"],
-            "expires_at_frame": snapshot["sim_frame"] + MAX_PLAN_TICKS, "orders": orders}
+            "valid_for_ticks": max_plan_ticks, "orders": orders}
+
+
+def submission_rejection(plan, requested, latest, *, elapsed, snapshot_age, config):
+    validate_plan(plan, requested, plan_tick_limit(config))
+    if elapsed < 0 or elapsed > config.timeout:
+        return "network_wait_budget_exceeded"
+    if (latest is None or latest["match_id"] != requested["match_id"]
+            or latest["controlled_house_id"] != requested["controlled_house_id"]):
+        return "match_or_house_changed"
+    if (snapshot_age >= 5 or snapshot_age < 0 or latest["sim_frame"] < requested["sim_frame"]
+            or latest["snapshot_seq"] < requested["snapshot_seq"]):
+        return "game_snapshot_stale"
+    if not has_combat_groups(latest):
+        return "no_available_combat_groups"
+    return None
 
 
 class SharedMemory:
@@ -538,6 +593,11 @@ class GameLifetime:
         self.handles.clear()
 
 
+def write_summary_log(log, kind, data):
+    log.write(json.dumps({"timestamp": utc_timestamp(), "kind": kind, "data": data}) + "\n")
+    log.flush()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Local llm.ini path; beside a packaged EXE, or at the repository root.")
@@ -552,11 +612,12 @@ def main():
     parser.add_argument("--runtime-log", type=Path, help="Safe startup/status log for automatic background launch.")
     parser.add_argument("--interval", type=float, help="Override minimum wall-clock seconds between requests.")
     parser.add_argument("--timeout", type=float, help="Override HTTP timeout in wall-clock seconds.")
+    parser.add_argument("--plan-ttl-seconds", type=int, help="Override maximum plan lifetime after DLL acceptance, in simulation seconds (1-30).")
     parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=None, help="Override server-side strict schema mode.")
     parser.add_argument("--check-config", action="store_true", help="Validate the INI without sending a request; never print authorization.")
     parser.add_argument("--mock", action="store_true", help="Exercise the control loop without API calls.")
     parser.add_argument("--mock-action", choices=("hold", "attack_target"), default="hold")
-    parser.add_argument("--log", type=Path, help="Optional JSONL log of snapshots, plans, and execution feedback.")
+    parser.add_argument("--log", type=Path, help="Optional timestamped JSONL log of snapshots, plans, and execution feedback.")
     parser.add_argument("--show-schema", action="store_true")
     args = parser.parse_args()
     if args.runtime_log:
@@ -566,7 +627,7 @@ def main():
         print(json.dumps(function_tool(), indent=2))
         return
     if args.api_url and args.base_url:
-        parser.error("choose api-url or base-url")
+        parser.error("[" + utc_timestamp() + "] choose api-url or base-url")
     try:
         runtime = load_bridge_config(args.config) if args.config.exists() else BridgeConfig()
         args.mock = args.mock or runtime.mode == "mock"
@@ -582,13 +643,14 @@ def main():
             endpoint = args.base_url.rstrip("/") + ("/chat/completions" if protocol == "chat_completions" else "/responses")
         from dataclasses import replace
         overrides = {"protocol": protocol, "api_url": endpoint, "model": args.model,
-                     "timeout": args.timeout, "interval": args.interval, "strict": args.strict}
+                     "timeout": args.timeout, "plan_ttl_seconds": args.plan_ttl_seconds,
+                     "interval": args.interval, "strict": args.strict}
         config = replace(config, **{key: value for key, value in overrides.items() if value is not None})
         validate_config(config, require_auth=not args.mock or args.check_config)
     except ConfigError as error:
-        parser.error(str(error))
+        parser.error("[" + utc_timestamp() + "] " + str(error))
     if args.check_config:
-        print("llm.ini is valid; authorization is configured and has not been displayed.")
+        log_status("llm.ini is valid; authorization is configured and has not been displayed.")
         return
     log = None
     if args.log:
@@ -609,7 +671,10 @@ def main():
     next_request = 0.0
     last_requested = None
     last_update = 0.0
-    print("LLM bridge ready; waiting for an opted-in single-player skirmish.", flush=True)
+    request_started = 0.0
+    combat_ready = None
+    combat_context = None
+    log_status("LLM bridge ready; waiting for an opted-in single-player skirmish.")
     try:
         while not lifetime.stopped():
             channel.heartbeat()
@@ -618,68 +683,82 @@ def main():
                 snapshot = channel.read_snapshot()
             except (BridgeError, json.JSONDecodeError, UnicodeDecodeError):
                 snapshot = None
-                print("Rejected malformed game snapshot.", file=sys.stderr, flush=True)
+                log_status("Rejected malformed game snapshot.", file=sys.stderr)
             if snapshot is not None:
                 latest, last_update = snapshot, now
+                context = (latest["match_id"], latest["controlled_house_id"])
+                if context != combat_context:
+                    combat_context, combat_ready = context, None
+                ready = has_combat_groups(latest)
+                if ready != combat_ready:
+                    combat_ready = ready
+                    status = "resumed" if ready else "paused"
+                    log_status("LLM requests " + status + ": " + ("combat groups available." if ready else "no available combat groups."))
+                    status_audit = channel.audit_for(latest, config)
+                    if status_audit:
+                        status_audit.record("llm_requests_" + status,
+                                            {"reason": "combat_groups_available" if ready else "no_available_combat_groups"})
                 if log:
-                    log.write(json.dumps({"kind": "snapshot", "data": latest}) + "\n")
-                    log.flush()
+                    write_summary_log(log, "snapshot", latest)
             if pending is not None and pending.done():
                 try:
                     plan = pending.result()
-                    if (latest is not None and latest["match_id"] == requested["match_id"]
-                            and latest["controlled_house_id"] == requested["controlled_house_id"]
-                            and latest["sim_frame"] < plan["expires_at_frame"] and now - last_update < 5):
+                    reason = submission_rejection(plan, requested, latest, elapsed=now - request_started,
+                                                  snapshot_age=now - last_update, config=config)
+                    if reason is None:
                         channel.write_plan(plan, requested)
                         if audit:
-                            audit.record("llm_plan_submitted", {"plan": plan, "current_sim_frame": latest["sim_frame"]})
-                        print("Submitted plan for snapshot " + str(requested["snapshot_seq"]), flush=True)
+                            audit.record("llm_plan_submitted", {"plan": plan, "current_sim_frame": latest["sim_frame"],
+                                "network_elapsed_seconds": now - request_started})
+                        log_status("Submitted plan for snapshot " + str(requested["snapshot_seq"]))
                         if log:
-                            log.write(json.dumps({"kind": "plan", "data": plan}) + "\n")
-                            log.flush()
+                            write_summary_log(log, "plan", plan)
                     else:
-                        print("Discarded stale API plan.", flush=True)
+                        log_status("Discarded API plan: " + reason + ".")
                         if audit:
-                            audit.record("llm_plan_discarded", {"reason": "stale_response", "plan": plan})
+                            audit.record("llm_plan_discarded", {"reason": reason, "plan": plan,
+                                "network_elapsed_seconds": now - request_started})
                 except (BridgeError, ValueError, KeyError, TypeError) as error:
                     reason = ": " + str(error) if isinstance(error, BridgeError) else ": invalid response data"
-                    print("Plan rejected or API unavailable" + reason + "; existing plans expire normally.",
-                          file=sys.stderr, flush=True)
+                    log_status("Plan rejected or API unavailable" + reason + "; existing plans expire normally.",
+                               file=sys.stderr)
                     next_request = max(next_request, now + config.interval)
                 pending = None
                 audit = None
             identity = (latest["match_id"], latest["snapshot_seq"]) if latest else None
-            if pending is None and latest is not None and now >= next_request and now - last_update < 5 and identity != last_requested:
+            if (pending is None and latest is not None and has_combat_groups(latest)
+                    and now >= next_request and now - last_update < 5 and identity != last_requested):
                 requested = latest
                 last_requested = identity
                 next_request = now + config.interval
+                request_started = now
                 audit = channel.audit_for(requested, config)
                 if args.mock:
                     if audit:
                         audit.record("llm_mock_request", {"action": args.mock_action})
-                    pending = executor.submit(mock_plan, requested, args.mock_action)
+                    pending = executor.submit(mock_plan, requested, args.mock_action, plan_tick_limit(config))
                 else:
                     pending = executor.submit(request_plan, requested, config=config, audit=audit)
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("Bridge stopped; native AI will resume.", flush=True)
+        log_status("Bridge stopped; native AI will resume.")
     finally:
         channel.close()
         lifetime.close()
         executor.shutdown(wait=True, cancel_futures=True)
         if log:
             log.close()
-        print("Bridge stopped; native AI will resume.", flush=True)
+        log_status("Bridge stopped; native AI will resume.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except (BridgeError, ConfigError) as error:
-        print(str(error), file=sys.stderr)
+        log_status(str(error), file=sys.stderr)
         sys.exit(1)
     except Exception:
         # A hidden bootstrap must leave a diagnostic without dumping INI data
         # or an unexpected exception's potentially credential-bearing message.
-        print("Bridge failed unexpectedly; inspect the per-match log and configuration.", file=sys.stderr)
+        log_status("Bridge failed unexpectedly; inspect the per-match log and configuration.", file=sys.stderr)
         sys.exit(1)

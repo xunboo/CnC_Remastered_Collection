@@ -121,6 +121,7 @@ void LLMBridge::New_Match(unsigned int & low, unsigned int & high)
 }
 void LLMBridge::Object_Created(unsigned int target) { Identities.Created(target); }
 unsigned int LLMBridge::Object_Generation(unsigned int target) { return Identities.Generation(target); }
+unsigned int LLMBridge::Milliseconds() { return GetTickCount(); }
 
 bool LLMBridge::Publish(std::string const & snapshot)
 {

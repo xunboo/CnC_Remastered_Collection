@@ -76,6 +76,26 @@ static int Harvest_Wait_Weight(void)
     if (!Rule.AstarPathFindingEnabled) wait /= CELL_LEPTON_W;
     return HarvestAI::Clamp(wait, 1, 64);
 }
+static int Harvest_Ore_Yield(CELL cell)
+{
+    // A native harvest step lifts one ore level, but four gem bails. Compare
+    // that return before the stockpile size so a sparse gem cell still wins
+    // over a thick ordinary ore cell at a similar reachable distance.
+    switch (Map[cell].Overlay) {
+        case OVERLAY_GOLD1:
+        case OVERLAY_GOLD2:
+        case OVERLAY_GOLD3:
+        case OVERLAY_GOLD4:
+            return HarvestAI::Clamp(Rule.GoldValue, 0, 10000000);
+        case OVERLAY_GEMS1:
+        case OVERLAY_GEMS2:
+        case OVERLAY_GEMS3:
+        case OVERLAY_GEMS4:
+            return HarvestAI::Clamp(Rule.GemValue, 0, 2500000) * 4;
+        default:
+            return 0;
+    }
+}
 static void Harvest_Reservations(UnitClass const * unit, TravelMap const & field, std::vector<int> & claims)
 {
     for (int i = 0; i < Units.Count(); ++i) {
@@ -111,11 +131,9 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
     if (Target_Legal(NavCom)) return false; // Preserve an active ore order.
     CELL source = Coord_Cell(Center_Coord());
     if (!Map.In_Radar(source)) return false;
-    if (Map[source].Land_Type() == LAND_TIBERIUM) {
-        House->IsTiberiumShort = false;
-        return true;
-    }
-    if (radius <= 1) return false;
+    bool on_ore = Map[source].Land_Type() == LAND_TIBERIUM;
+    if (on_ore) House->IsTiberiumShort = false;
+    if (radius <= 1) return on_ore;
     radius = HarvestAI::Clamp(radius - 1, 1, MAP_CELL_W + MAP_CELL_H);
     TravelMap field(MAP_CELL_W, MAP_CELL_H);
     Harvest_Routes(field, this);
@@ -131,8 +149,9 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
         int distance = field.Distance[cell] + HarvestAI::Clamp(claims[cell] * 2, 0, 12);
         if (distance < nearest) nearest = distance;
     }
-    if (nearest == INT_MAX) return false;
-    int best = -1, best_score = -1, best_distance = INT_MAX;
+    if (nearest == INT_MAX) return on_ore;
+    int best = -1, best_score = -1, best_yield = -1, best_distance = INT_MAX;
+    int source_score = 0, source_yield = 0;
     int band = nearest + HarvestAI::Nearby_Band(nearest);
     for (int cell = 0; cell < MAP_CELL_TOTAL; ++cell) {
         if (values[cell] <= 0) continue;
@@ -148,13 +167,25 @@ bool UnitClass::Harvest_Goto_Ore(int radius)
             }
         }
         int score = HarvestAI::Ore_Score(values[cell], surrounding, claims[cell]);
-        if (best < 0 || score > best_score || (score == best_score && distance < best_distance)) {
-            best = cell; best_score = score; best_distance = distance;
+        int yield = HarvestAI::Ore_Score(Harvest_Ore_Yield((CELL)cell), 0, claims[cell]);
+        if (cell == source) { source_score = score; source_yield = yield; }
+        if (best < 0 || yield > best_yield
+            || (yield == best_yield && (score > best_score || (score == best_score && distance < best_distance)))) {
+            best = cell; best_score = score; best_yield = yield; best_distance = distance;
         }
     }
+    if (best < 0 || best == source) return on_ore;
+    // Keep harvesting comparable cells instead of continually moving between
+    // them. A higher-yield resource wins immediately; equal-yield density
+    // changes must exceed both a 25% margin and one harvest step's value.
+    if (on_ore && best_yield <= source_yield
+        && best_score <= source_score + max(source_score / 4, source_yield)) return true;
     if (best >= 0) {
         AILog::Record(Frame, House->Class->House, "harvester_ore_selected", AILog::Fields().Number("unit", As_Target())
-            .Number("source", source).Number("destination", best).Number("score", best_score).Number("distance", best_distance).Number("nearby_band", band));
+            .Number("source", source).Number("destination", best).Number("score", best_score).Number("distance", best_distance).Number("nearby_band", band)
+            .Number("route_distance", field.Distance[best]).Number("ore_value", values[best]).Number("yield_per_step", Harvest_Ore_Yield((CELL)best))
+            .Number("claims", claims[best]).Number("source_value", values[source]).Number("source_yield_per_step", Harvest_Ore_Yield(source))
+            .Text("reason", !on_ore ? "best_nearby_ore" : best_yield > source_yield ? "higher_harvest_yield" : "richer_nearby_cell"));
         House->IsTiberiumShort = false;
         Assign_Destination(::As_Target((CELL)best));
     }
@@ -268,6 +299,18 @@ void UnitClass::Harvest_Think(void)
     state.NextCheck = Frame + TICKS_PER_SECOND * 3;
     if (Status == 2) {
         ReconsiderRefinery();
+    } else if ((Status == 0 || Status == 1) && !Target_Legal(NavCom) && !IsDriving
+        && Tiberium_Load() < 1 && Map.In_Radar(cell) && Map[cell].Land_Type() == LAND_TIBERIUM) {
+        // Notice richer nearby resources while mining, without waiting for
+        // the current cell to run out. Preserve partial cargo and resume the
+        // native LOOKING -> HARVESTING sequence after reaching the new cell.
+        if (!Harvest_Goto_Ore(Rule.TiberiumShortScan / CELL_LEPTON_W) && Target_Legal(NavCom)) {
+            IsHarvesting = false;
+            ArchiveTarget = TARGET_NONE;
+            Status = 0; // LOOKING
+            Set_Stage(0);
+            Set_Rate(0);
+        }
     } else if ((Status == 0 || Status == 1) && Target_Legal(NavCom) && Frame - state.ProgressFrame >= TICKS_PER_SECOND * 10) {
         // Re-evaluate a depleted or blocked autonomous ore destination. A
         // moving truck and a queued player command keep their existing order.

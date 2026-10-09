@@ -12,6 +12,14 @@ import uuid
 SENSITIVE_KEYS = {"authorization", "api_key", "apikey", "api-key", "access_token", "refresh_token", "client_secret", "token"}
 
 
+def utc_timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def log_status(message, *, file=None):
+    print("[" + utc_timestamp() + "] " + message, file=file, flush=True)
+
+
 class Overlapped(ctypes.Structure):
     _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
                 ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
@@ -52,7 +60,7 @@ class MatchAudit:
     def record(self, event, data):
         with self.lock:
             self.sequence += 1
-            row = {"log_version": 1, "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            row = {"log_version": 1, "timestamp": utc_timestamp(),
                    "source": "llm_bridge", "pid": os.getpid(), "seq": self.sequence,
                    "match_id": self.snapshot["match_id"], "sim_frame": self.snapshot["sim_frame"],
                    "house_id": self.snapshot["controlled_house_id"], "snapshot_seq": self.snapshot["snapshot_seq"],
@@ -78,5 +86,5 @@ class MatchAudit:
 
     def failure(self):
         if not self.warned:
-            print("Could not append LLM data to the DLL match log; check log directory permissions and disk space.", file=sys.stderr, flush=True)
+            log_status("Could not append LLM data to the DLL match log; check log directory permissions and disk space.", file=sys.stderr)
             self.warned = True

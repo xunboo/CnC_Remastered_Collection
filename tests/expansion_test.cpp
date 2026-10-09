@@ -42,14 +42,21 @@ typedef int UrgencyType;
 const int URGENCY_NONE=0, URGENCY_LOW=1, URGENCY_MEDIUM=2, URGENCY_HIGH=3, URGENCY_CRITICAL=4;
 #define ARRAY_SIZE(a) (int)(sizeof(a)/sizeof(a[0]))
 struct BuildChoiceClass {
-    int Urgency, Type;
+    int Urgency;
+    union { int Type; int Structure; };
     BuildChoiceClass(int urgency=URGENCY_NONE,int type=STRUCT_NONE):Urgency(urgency),Type(type) {}
 };
-struct BuildChoicePool { BuildChoiceClass Choice; BuildChoiceClass * Alloc() { return &Choice; } };
+struct BuildChoicePool {
+    std::vector<BuildChoiceClass> Choices;
+    BuildChoiceClass * Alloc() { Choices.emplace_back(); return &Choices.back(); }
+    int Count() const { return (int)Choices.size(); }
+    BuildChoiceClass * Ptr(int i) { return &Choices[i]; }
+};
 int Frame=0;
 bool NewUnitsEnabled=true;
 struct { int Type=1; } Session;
-struct { int GoldValue=25, GemValue=50, AIAftermathfastbuild=0, AIProductionAggressiveness=1, AIBuildingsMultiplier=1; bool HarvesterOptimizeEnabled=true, IsAutoCrush=true; } Rule;
+struct { int GoldValue=25, GemValue=50, AIAftermathfastbuild=0, AIProductionAggressiveness=1, AIBuildingsMultiplier=1,
+    IQHarvester=1, AIHarvesterMaxLimit=10; bool HarvesterOptimizeEnabled=true, IsAutoCrush=true; } Rule;
 struct { int Waypoint[WAYPT_COUNT]={-1,-1,-1,-1,-1,-1,-1,-1}; } Scen;
 struct { int Normal_Delay() const { return 1; } } MissionControl[8];
 int Random_Pick(int low,int) { return low; }
@@ -114,11 +121,13 @@ public:
     ClassFixture * Class=&OwnClass;
     bool IsHuman=false, IsActive=true, IsDefeated=false, IsBaseBuilding=true, IsTiberiumShort=false, Allied=false;
     bool AllowExtraBaseAtWaypoint=false;
-    int Power=400, Drain=100, ActLike=0, Money=20000, ID=0, AIDogKennelLimit=2;
+    int Power=400, Drain=100, AIPowerPlus=0, ActLike=0, Money=20000, ID=0, AIDogKennelLimit=2, IQ=5;
     int AIMaxConYardsAndMCVs=4, AIMaxBuildings=100, AIRefineryLimit=8, AIWarFactoryLimit=4, AIMaxTanksNr=100;
+    int AIBarracksLimit=0, AIMaxInfantryNr=0, AIMaxAirNr=0;
+    unsigned HarvestedCredits=0;
     int HumanBuildingCount=10;
     long Capacity=0, Tiberium=0;
-    int CurBuildings=0, CurUnits=10, CurInfantry=0, CurAircraft=0, AIPersonalStrategyMode=1, BuildUnit=UNIT_NONE;
+    int CurBuildings=0, CurUnits=10, CurInfantry=0, CurAircraft=0, CurVessels=0, AIPersonalStrategyMode=1, BuildUnit=UNIT_NONE;
     int BuildInfantry=INFANTRY_NONE, BuildAircraft=AIRCRAFT_NONE, BuildVessel=VESSEL_NONE, BuildStructure=STRUCT_NONE;
     FactoryClass * Factories[5]={nullptr};
     FactoryClass * Fetch_Factory(int type) const { return Factories[type]; }
@@ -133,8 +142,14 @@ public:
     int QuantityU(int type) { return UQuantity[type]; }
     int Factory_Count(int) const { return BQuantity[STRUCT_WEAP]; }
     AIStrategy::EnemyForces AI_Enemy_Forces() const { return Forces; }
-    int Native_Economic_Priority() {
+    int Native_Economic_Priority(int candidate=STRUCT_NONE, int second=STRUCT_NONE) {
 #include "expansion_building_priority.inc"
+        int money=AI_Economic_Cash();
+#include "expansion_building_budget.inc"
+        BuildChoicePool BuildChoice;
+        if(candidate!=STRUCT_NONE) *BuildChoice.Alloc()=BuildChoiceClass(URGENCY_MEDIUM,candidate);
+        if(second!=STRUCT_NONE) *BuildChoice.Alloc()=BuildChoiceClass(URGENCY_MEDIUM,second);
+#include "expansion_building_selection.inc"
         return TICKS_PER_SECOND;
     }
     void AI_Refresh_Economy();
@@ -147,19 +162,25 @@ public:
         BuildingTypeClass const * b=nullptr; BuildChoiceClass * choiceptr=nullptr;
         BuildChoicePool BuildChoice; int money=Money; bool hasincome=AI_Economic_Has_Income();
 #include "expansion_kennel_choice.inc"
-        return BuildChoice.Choice;
+        return BuildChoice.Count() ? *BuildChoice.Ptr(0) : BuildChoiceClass();
     }
     BuildChoiceClass Native_Storage_Choice() {
         BuildingTypeClass const * b=nullptr; BuildChoiceClass * choiceptr=nullptr;
         BuildChoicePool BuildChoice; int money=Money; bool hasincome=AI_Economic_Has_Income();
 #include "expansion_storage_choice.inc"
-        return BuildChoice.Choice;
+        return BuildChoice.Count() ? *BuildChoice.Ptr(0) : BuildChoiceClass();
     }
     bool AI_Economic_MCV_Ready();
+    int AI_Economic_MCV_Budget();
+    bool AI_Economic_Storage_Priority() const;
     int AI_Economic_Reserve() const;
     int AI_Economic_Cash() const;
     int AI_Economic_Combat_Budget() const;
+    int AI_Economic_Recovery_Reserve() const;
+    int AI_Economic_Military_Reserve() const;
+    bool AI_Economic_Combat_Priority() const;
     StructType AI_Economic_Building();
+    StructType AI_Essential_Building();
     COORDINATE AI_Economic_Location(BuildingClass const *) const;
 };
 struct DriverFixture { int Mission_Guard() { return 3; } };
@@ -301,6 +322,7 @@ struct World {
     World() {
         Units.Data.clear(); Buildings.Data.clear(); Infantry.Data.clear(); Vessels.Data.clear(); Aircraft.Data.clear();
         AIExpansion::Reset(); Frame=0; Session.Type=1; NewUnitsEnabled=true; Rule.AIAftermathfastbuild=0; Rule.AIProductionAggressiveness=1;
+        Rule.IQHarvester=1; Rule.AIHarvesterMaxLimit=10;
         Map.MapCellX=Map.MapCellY=0; Map.MapCellWidth=Map.MapCellHeight=128;
         for(auto & cell:Map.Cells) cell=FakeCell();
         for(int i=0;i<UNIT_COUNT;++i) { UnitTypeClass::Types[i]=UnitTypeClass(); UnitTypeClass::Types[i].Type=i; }
@@ -336,6 +358,26 @@ struct World {
         Unit(UNIT_HARVESTER,15,21); Unit(UNIT_HARVESTER,17,21);
         if(ore) Ore(20,25);
     }
+    void StorageBase(unsigned income=3000) {
+        Base(); Build(STRUCT_REFINERY,21,18); Build(STRUCT_WEAP,22,12);
+        BuildingTypeClass::Types[STRUCT_RADAR].Allowed=false;
+        AI.AI_Economic_Has_Income(); AI.HarvestedCredits+=income;
+    }
+    void GrowthBase(unsigned income=8400) {
+        Base(); Build(STRUCT_REFINERY,21,18);
+        Unit(UNIT_HARVESTER,18,21); Unit(UNIT_HARVESTER,19,21);
+        Frame=5*TICKS_PER_MINUTE; AI.CurUnits=12;
+        for(int i=UNIT_HTANK;i<=UNIT_LTANK;++i) UnitTypeClass::Types[i].Cost=950;
+        BuildingTypeClass::Types[STRUCT_STORAGE].Capacity=1500;
+        BuildingTypeClass::Types[STRUCT_STORAGE].Drain=10;
+        AI.Power=700; AI.Drain=460; AI.AIPowerPlus=1000;
+        AI.Capacity=AI.Tiberium=4000; AI.Money=4054;
+        AI.AI_Economic_Has_Income(); AI.HarvestedCredits+=income;
+    }
+    void Lose(BuildingClass * building) {
+        building->IsInLimbo=true; --building->House->BQuantity[building->Class->Type]; --building->House->CurBuildings;
+        for(auto & cell:Map.Cells) if(cell.Building==building) cell.Building=nullptr;
+    }
 };
 int main() {
     {
@@ -350,7 +392,7 @@ int main() {
     }
     {
         World w; w.Base(); w.AI.Capacity=2000; w.AI.Tiberium=2000;
-        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"full storage prioritizes a funded silo before optional expansion");
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"full storage cannot displace useful refinery investment");
     }
     {
         World w; w.Base(); w.Ore(50,28);
@@ -660,7 +702,7 @@ int main() {
         check(w.AI.BuildStructure==STRUCT_WEAP,"native building priority can fund sustained tank capacity above the relative human base-size limit");
         w.AI.BuildStructure=STRUCT_NONE; w.AI.CurBuildings=w.AI.AIMaxBuildings;
         w.AI.Native_Economic_Priority();
-        check(w.AI.BuildStructure==STRUCT_NONE,"economic priority still respects the configured overall base-size cap");
+        check(w.AI.BuildStructure==STRUCT_RADAR,"essential radar capability can recover at the overall base-size cap");
     }
     {
         World w; w.Base(); BuildingClass * lost=Buildings.Data[1]; lost->IsInLimbo=true;
@@ -811,10 +853,10 @@ int main() {
         check(!w.AI.AI_Economic_MCV_Ready(),"enemy-covered local ore cannot satisfy a safe second-base deployment");
     }
     {
-        World w; w.Base(); w.AI.Capacity=2000; w.AI.Tiberium=1799;
-        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"unused storage below the ninety-percent trigger does not buy silos");
+        World w; w.StorageBase(); w.AI.Capacity=2000; w.AI.Tiberium=999;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"capacity covering forecast income does not buy silos");
         w.AI.Tiberium=1800;
-        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"storage expansion starts exactly at ninety-percent occupancy");
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"near-term income exceeding free capacity starts funded storage");
         BuildingClass preview; preview.Class=&BuildingTypeClass::Types[STRUCT_STORAGE];
         int first=Coord_Cell(w.AI.AI_Economic_Location(&preview));
         check(preview.Class->Legal_Placement(first) && Map.Passes_Proximity_Check(preview.Class,0,preview.Class->Occupy_List(true),first),"planned silo has legal foundation and construction proximity");
@@ -825,19 +867,21 @@ int main() {
         }
         check(exits_clear,"storage placement leaves refinery docking and factory exit traffic clear");
         auto silo=w.Build(STRUCT_STORAGE,first%128,first/128); w.AI.Capacity+=500; w.AI.Tiberium-=150;
-        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"first silo does not cancel the promised pair after occupancy falls");
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"forecast still exceeding free capacity justifies the next silo");
         int second=Coord_Cell(w.AI.AI_Economic_Location(&preview));
         w.Build(STRUCT_STORAGE,second%128,second/128); w.AI.Capacity+=500; w.AI.Tiberium-=150;
-        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"two silos with sufficient free buffer end expansion");
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"sufficient forecast buffer ends storage expansion");
         silo->IsInLimbo=true; --w.AI.BQuantity[STRUCT_STORAGE]; w.AI.Capacity-=500;
-        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"loss of one silo restores the established storage pair");
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"losing a silo does not force rebuilding when remaining capacity is sufficient");
+        ++w.AI.Tiberium;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"a later capacity deficit can restore a lost silo");
         AIExpansion::Reset();
-        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"scenario-state reset can recover the pair from an existing silo");
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"scenario reset waits for observed income rather than inferring it from a stockpile");
     }
     {
-        World w; w.Base(); w.Build(STRUCT_STORAGE,7,12); w.Build(STRUCT_STORAGE,7,15);
+        World w; w.StorageBase(); w.Build(STRUCT_STORAGE,7,12); w.Build(STRUCT_STORAGE,7,15);
         w.AI.Capacity=4000; w.AI.Tiberium=3000;
-        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"exact two-silo free-capacity buffer does not add another silo");
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"exact forecast capacity does not add another silo");
         w.AI.Tiberium=3001;
         check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"filled buffer can expand beyond two silos when required");
         w.AI.Capacity=2147483647L; w.AI.Tiberium=2147483647L;
@@ -848,7 +892,7 @@ int main() {
         check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"a zero-capacity silo type is not bought");
     }
     {
-        World w; w.Base(); w.AI.Capacity=w.AI.Tiberium=2000; w.AI.Money=2049;
+        World w; w.StorageBase(); w.AI.Capacity=w.AI.Tiberium=2000; w.AI.Money=2049;
         check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"silos retain the military and power reserve even when full");
         check(w.AI.Native_Storage_Choice().Type!=STRUCT_STORAGE,"legacy skirmish silo choice cannot bypass reserved funding");
         w.AI.Money=2050;
@@ -863,7 +907,7 @@ int main() {
         check(w.AI.AI_Economic_Building()==STRUCT_NONE && w.AI.Native_Storage_Choice().Type==STRUCT_STORAGE,"campaign silo choices retain legacy behavior");
     }
     {
-        World w; w.Base(); w.AI.Capacity=w.AI.Tiberium=2000;
+        World w; w.StorageBase(); w.AI.Capacity=w.AI.Tiberium=2000;
         BuildingTypeClass::Types[STRUCT_STORAGE].Allowed=false;
         check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"silo expansion respects scenario technology");
         BuildingTypeClass::Types[STRUCT_STORAGE].Allowed=true;
@@ -900,6 +944,273 @@ int main() {
         check(w.AI.AI_Economic_Building()!=STRUCT_WEAP,"failed infrastructure searches are cached between scan intervals");
         Frame+=10*TICKS_PER_SECOND;
         check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"periodic retry discovers newly opened construction space");
+    }
+    {
+        World w; w.StorageBase(6000); w.AI.Capacity=w.AI.Tiberium=2000;
+        w.AI.CurUnits=4; w.AI.Money=400000;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"a wealthy depleted army and needed storage can be funded concurrently");
+        check(w.AI.AI_Economic_Military_Reserve()==5100 && w.AI.AI_Economic_Combat_Priority(),
+            "storage keeps the four replacement tanks and baseline military reserve funded");
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_STORAGE && w.AI.AI_Economic_Combat_Budget()>=800,
+            "a queued silo leaves enough uncommitted funds for combat production");
+        w.AI.BuildStructure=STRUCT_NONE;
+        w.AI.CurUnits=10;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"restoring the fighting force permits a genuinely needed storage buffer");
+        w.AI.CurUnits=6; w.AI.Money=3649;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"storage cannot spend the funds needed to replenish missing combat vehicles");
+        w.AI.Money=3650;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"storage is permitted when both replenishment and the silo are fully funded");
+        w.AI.CurUnits=2; w.AI.CurVessels=8; w.AI.Money=20000;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"a healthy naval force is not mistaken for a severely depleted army");
+    }
+    {
+        World w; w.StorageBase(); w.AI.Capacity=w.AI.Tiberium=2000; w.AI.CurUnits=4; w.AI.Money=5250;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"a depleted army can buy a silo at the exact combined reinforcement and construction budget");
+        w.AI.BuildUnit=UNIT_MTANK;
+        check(w.AI.AI_Economic_Cash()==4450 && w.AI.AI_Economic_Military_Reserve()==4300,
+            "a same-tick tank request is deducted once and counts toward recovery");
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"a queued tank and a silo can share the exact combined funding boundary");
+        FactoryClass tank; tank.Balance=800; tank.Object=&tank; w.AI.Factories[RTTI_UNITTYPE]=&tank; ++w.AI.CurUnits;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE && w.AI.AI_Economic_Military_Reserve()==4300,
+            "creation of the native tank object does not count a pending reinforcement twice");
+    }
+    {
+        World w; w.StorageBase(); w.AI.Capacity=w.AI.Tiberium=2000;
+        BuildingTypeClass::Types[STRUCT_RADAR].Allowed=true;
+        w.AI.Native_Economic_Priority(STRUCT_RADAR);
+        check(w.AI.BuildStructure==STRUCT_RADAR,"a useful native facility is selected before funded storage");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.Money=2200;
+        w.AI.Native_Economic_Priority(STRUCT_SOVIET_TECH);
+        check(w.AI.BuildStructure==STRUCT_NONE,"an unfunded technology facility saves its budget instead of spending on a cheaper silo");
+        BuildingTypeClass::Types[STRUCT_KENNEL].Cost=150;
+        w.AI.Native_Economic_Priority(STRUCT_SOVIET_TECH,STRUCT_KENNEL);
+        check(w.AI.BuildStructure==STRUCT_KENNEL,"random medium-priority selection only includes affordable choices");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"storage is selected after native construction needs are fulfilled");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.AIPowerPlus=400;
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_NONE,"unfunded power margin requirements precede optional storage too");
+        BuildingTypeClass::Types[STRUCT_POWER].Allowed=false; BuildingTypeClass::Types[STRUCT_ADVANCED_POWER].Allowed=false;
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"an unavailable power technology cannot indefinitely veto a legal powered silo");
+    }
+    {
+        World w; w.GrowthBase();
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET,STRUCT_ADVANCED_POWER);
+        check(w.AI.BuildStructure==STRUCT_STORAGE,
+            "a full two-refinery base funds a silo before optional defenses and surplus power to unlock its second factory");
+        w.AI.BuildStructure=STRUCT_NONE;
+        BuildingClass preview; preview.Class=&BuildingTypeClass::Types[STRUCT_STORAGE];
+        int cell=Coord_Cell(w.AI.AI_Economic_Location(&preview));
+        w.Build(STRUCT_STORAGE,cell%128,cell/128);
+        w.AI.Capacity+=1500; w.AI.Tiberium=w.AI.Capacity; w.AI.Money=w.AI.Capacity+54;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET,STRUCT_ADVANCED_POWER);
+        check(w.AI.BuildStructure==STRUCT_WEAP,
+            "the added silo lets retained ore fund the second factory ahead of optional native construction");
+    }
+    {
+        World w; w.GrowthBase(300); w.Build(STRUCT_WEAP,22,12); w.Build(STRUCT_REPAIR,25,18);
+        check(!w.AI.AI_Economic_MCV_Ready(),"an otherwise eligible outpost cannot purchase an MCV at the old storage ceiling");
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET,STRUCT_ADVANCED_POWER);
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"storage blocked MCV funding takes priority over optional construction");
+        w.AI.BuildStructure=STRUCT_NONE;
+        BuildingClass preview; preview.Class=&BuildingTypeClass::Types[STRUCT_STORAGE];
+        int cell=Coord_Cell(w.AI.AI_Economic_Location(&preview));
+        w.Build(STRUCT_STORAGE,cell%128,cell/128);
+        w.AI.Capacity+=1500; w.AI.Tiberium-=150; w.AI.Money-=150;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET,STRUCT_ADVANCED_POWER);
+        check(w.AI.BuildStructure==STRUCT_STORAGE,
+            "a second funded silo completes the MCV savings capacity even when the first covers forecast income");
+        w.AI.BuildStructure=STRUCT_NONE;
+        cell=Coord_Cell(w.AI.AI_Economic_Location(&preview));
+        w.Build(STRUCT_STORAGE,cell%128,cell/128);
+        w.AI.Capacity+=1500; w.AI.Tiberium=w.AI.Capacity; w.AI.Money=w.AI.Capacity+54;
+        check(w.AI.AI_Economic_MCV_Ready(),"two added silos allow the reserved MCV purchase without consuming its cooldown during planning");
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"storage growth priority ends after the MCV budget fits existing capacity");
+    }
+    {
+        World w; w.GrowthBase(); w.AI.Capacity=5096;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"exact cash plus capacity covering the factory budget retains ordinary construction priority");
+        w.AI.BuildStructure=STRUCT_NONE; --w.AI.Capacity;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"a one credit storage shortfall gives a funded silo priority");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.Capacity=6000;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"temporary low cash and adequate savings capacity do not retain stale storage priority");
+    }
+    {
+        World w; w.GrowthBase(); w.AI.Money=2349; w.AI.Tiberium=2295;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"priority storage cannot consume the military reserve to reach a growth budget");
+        w.AI.BuildStructure=STRUCT_NONE; ++w.AI.Money; ++w.AI.Tiberium;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_STORAGE,"a priority silo is permitted at its exact fully reserved funding boundary");
+        w.AI.BuildStructure=STRUCT_NONE;
+        FactoryClass tank; tank.Balance=1; tank.Object=&tank; w.AI.Factories[RTTI_UNITTYPE]=&tank;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"priority storage still reserves unpaid production commitments");
+        w.AI.Factories[RTTI_UNITTYPE]=nullptr; w.AI.BuildStructure=STRUCT_NONE;
+        w.AI.CurUnits=4; w.AI.Money=4054; w.AI.Tiberium=4000;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"priority storage cannot spend funds reserved for a depleted defending army");
+    }
+    {
+        World w; w.GrowthBase(); w.AI.AIWarFactoryLimit=0;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"a disabled factory category does not justify priority storage");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.AIWarFactoryLimit=4; BuildingTypeClass::Types[STRUCT_WEAP].Allowed=false;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"unavailable factory technology does not justify priority storage");
+        w.AI.BuildStructure=STRUCT_NONE; BuildingTypeClass::Types[STRUCT_WEAP].Allowed=true;
+        for(auto & cell:Map.Cells) cell.Buildable=false;
+        Frame+=10*TICKS_PER_SECOND;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"a factory with no legal foundation does not justify priority storage");
+    }
+    {
+        World w; w.GrowthBase(300); w.Build(STRUCT_WEAP,22,12); w.Build(STRUCT_REPAIR,25,18);
+        UnitTypeClass::Types[UNIT_MCV].Allowed=false;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"unavailable MCV technology does not justify priority storage");
+        w.AI.BuildStructure=STRUCT_NONE; UnitTypeClass::Types[UNIT_MCV].Allowed=true; w.AI.AIMaxConYardsAndMCVs=0;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"a disabled base category does not justify priority storage");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.AIMaxConYardsAndMCVs=4; w.AI.CurUnits=9;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"an MCV lacking sufficient defenders does not justify priority storage");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.CurUnits=12;
+        for(int y=0;y<128;++y) Map[Cell(30,y)].Clear=false;
+        for(int x=0;x<30;++x) for(int y=0;y<128;++y) Map[Cell(x,y)].Buildable=false;
+        Frame+=10*TICKS_PER_SECOND;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"an MCV lacking reachable legal deployment space does not justify priority storage");
+    }
+    {
+        World w; w.GrowthBase(); w.AI.CurBuildings=w.AI.AIMaxBuildings-1; w.AI.HumanBuildingCount=100;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure==STRUCT_FLAME_TURRET,"priority storage leaves room for the factory it is intended to unlock");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.CurBuildings=w.AI.AIMaxBuildings;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"priority storage respects the overall building cap");
+    }
+    {
+        World w; w.GrowthBase(); w.AI.Power=w.AI.Drain-1;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"emergency power remains ahead of storage growth");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.Power=w.AI.Drain;
+        BuildingTypeClass::Types[STRUCT_WEAP].Drain=30;
+        w.AI.Native_Economic_Priority(STRUCT_FLAME_TURRET);
+        check(w.AI.BuildStructure!=STRUCT_STORAGE,"a factory requiring additional operating power does not justify premature storage priority");
+    }
+    {
+        World w; w.Base(); w.AI.UQuantity[UNIT_HARVESTER]=1; w.AI.CurUnits=2; Units.Data[1]->IsInLimbo=true;
+        w.AI.Money=2199;
+        check(w.AI.AI_Economic_Recovery_Reserve()==1400 && w.AI.AI_Economic_Combat_Budget()==799,
+            "low funds retain the next recovery harvester price before combat spending");
+        check(!w.AI.AI_Economic_Combat_Priority(),"a combat unit that would consume recovery funds does not displace the harvester");
+        w.AI.Money=2200;
+        check(w.AI.AI_Economic_Combat_Priority(),"funds for both a recovery harvester and a tank allow combat queue priority");
+        w.AI.BuildUnit=UNIT_HARVESTER;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0 && w.AI.AI_Economic_Combat_Budget()==800,
+            "an already requested recovery harvester is not reserved a second time");
+        w.AI.BuildUnit=UNIT_NONE; Units.Data[0]->IsInLimbo=true; w.AI.UQuantity[UNIT_HARVESTER]=0;
+        check(!w.AI.AI_Economic_Combat_Priority(),"a complete loss of working harvesters always restores mining before ground troops");
+        w.AI.UQuantity[UNIT_HARVESTER]=1; Units.Data[0]->IsInLimbo=false; w.AI.AIMaxTanksNr=0;
+        check(!w.AI.AI_Economic_Combat_Priority(),"disabled combat production does not postpone economic recovery");
+        Rule.AIHarvesterMaxLimit=0;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0,"a disabled harvester category does not withhold combat funds");
+        w.AI.IsHuman=true;
+        check(w.AI.AI_Economic_Military_Reserve()==0 && !w.AI.AI_Economic_Combat_Priority(),"human production keeps its own funding priorities");
+        w.AI.IsHuman=false; Session.Type=GAME_NORMAL; Rule.AIHarvesterMaxLimit=10;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0 && w.AI.AI_Economic_Combat_Budget()==w.AI.Money,
+            "campaign military production keeps its existing budget");
+    }
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE; w.AI.CurUnits=4; w.AI.Money=3899;
+        check(w.AI.AI_Economic_Recovery_Reserve()==3900 && w.AI.AI_Economic_Combat_Budget()==0,
+            "low cash accumulates the funded second-refinery recovery budget instead of repeatedly buying troops");
+        check(w.AI.AI_Economic_Building()==STRUCT_NONE,"the recovery refinery waits for its complete construction and reserve budget");
+        w.AI.Money=3900; w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_REFINERY && w.AI.AI_Economic_Combat_Budget()==1900,
+            "the requested recovery refinery leaves its reserved military funds available for concurrent production");
+        w.AI.BuildStructure=STRUCT_NONE; w.AI.AIRefineryLimit=0;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0,"disabled refinery construction does not reserve an impossible investment");
+        w.AI.AIRefineryLimit=1; BuildingTypeClass::Types[STRUCT_REFINERY].Allowed=false;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0,"unavailable refinery technology leaves reinforcement funds spendable");
+    }
+    {
+        World w; w.Base(); Frame=5*TICKS_PER_MINUTE;
+        for(auto & cell:Map.Cells) cell.Buildable=false;
+        check(w.AI.AI_Economic_Recovery_Reserve()==0,"no legal refinery foundation leaves funds available to replenish troops");
+    }
+    {
+        World w; w.StorageBase(6000); w.AI.Capacity=w.AI.Tiberium=2000;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"observed deliveries establish the initial storage requirement");
+        Frame=61*TICKS_PER_SECOND;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"a full stockpile without recent deliveries stops storage investment");
+        w.AI.HarvestedCredits+=6000;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"actual renewed deliveries restore a capacity requirement");
+        w.AI.HarvestedCredits=UINT_MAX-10; AIExpansion::Reset(); w.AI.AI_Economic_Has_Income();
+        w.AI.HarvestedCredits=20; w.AI.Tiberium=1900;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE && Economies[0].IncomePerMinute==31,
+            "wrapping the unsigned native harvest ledger preserves the small actual income delta");
+    }
+    {
+        World w; w.StorageBase(600000); w.AI.Capacity=w.AI.Tiberium=400000; w.AI.Money=400000;
+        w.AI.AIMaxBuildings=300; w.AI.BQuantity[STRUCT_STORAGE]=12;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"funded demand can expand beyond twelve silos");
+        w.AI.BQuantity[STRUCT_STORAGE]=257; w.AI.CurBuildings=270;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"existing large storage fleets can expand when demand and building room permit");
+        w.AI.BQuantity[STRUCT_STORAGE]=4; Map.MapCellWidth=Map.MapCellHeight=50;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"legal small-map storage plots are checked without an arbitrary area quota");
+        Map.MapCellWidth=Map.MapCellHeight=128; w.AI.BQuantity[STRUCT_STORAGE]=0;
+        w.AI.CurBuildings=w.AI.AIMaxBuildings-1;
+        check(w.AI.AI_Economic_Building()==STRUCT_STORAGE,"fulfilled infrastructure can use the final available building slot for storage");
+        w.AI.CurBuildings=w.AI.AIMaxBuildings;
+        check(w.AI.AI_Economic_Building()!=STRUCT_STORAGE,"storage still respects the configured overall building cap");
+    }
+    {
+        World w; w.Base(); w.AI.Capacity=w.AI.Tiberium=2000;
+        w.AI.AI_Economic_Has_Income(); w.AI.HarvestedCredits+=6000;
+        check(w.AI.AI_Economic_Building()==STRUCT_REFINERY,"observed overflowing income cannot outrank useful refinery capacity");
+        w.Build(STRUCT_REFINERY,21,18);
+        check(w.AI.AI_Economic_Building()==STRUCT_WEAP,"funded production capacity precedes storage expansion");
+    }
+    {
+        World w; w.Base(); w.Lose(Buildings.Data[1]); w.AI.CurBuildings=w.AI.AIMaxBuildings;
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_WEAP,"the last destroyed War Factory recovers even at the overall building cap");
+        w.AI.BuildStructure=STRUCT_NONE; BuildingTypeClass::Types[STRUCT_WEAP].Allowed=false;
+        BuildingTypeClass::Types[STRUCT_RADAR].Allowed=false;
+        check(w.AI.AI_Essential_Building()==STRUCT_NONE,"essential recovery cannot bypass scenario technology restrictions");
+    }
+    {
+        World w; w.Base(); w.AI.AIBarracksLimit=1; w.AI.AIMaxInfantryNr=50;
+        w.AI.CurBuildings=w.AI.AIMaxBuildings;
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_BARRACKS,"missing infantry production can recover beyond optional base limits");
+        w.AI.BuildStructure=STRUCT_NONE; BuildingTypeClass::Types[STRUCT_BARRACKS].Allowed=false;
+        check(w.AI.AI_Essential_Building()==STRUCT_TENT,"barracks recovery selects the faction's legal alternative");
+        w.AI.AIBarracksLimit=0; BuildingTypeClass::Types[STRUCT_RADAR].Allowed=false;
+        check(w.AI.AI_Essential_Building()==STRUCT_NONE,"explicitly disabled infantry production does not gain a barracks");
+    }
+    {
+        World w; w.Base(); auto radar=w.Build(STRUCT_RADAR,25,15);
+        auto tech=w.Build(STRUCT_SOVIET_TECH,25,20); w.AI.AI_Economic_Has_Income();
+        w.Lose(radar); w.Lose(tech); w.AI.CurBuildings=30; w.AI.HumanBuildingCount=1;
+        w.AI.Native_Economic_Priority();
+        check(w.AI.BuildStructure==STRUCT_RADAR,"a lost known radar recovers above the relative human base-size limit");
+        w.AI.BuildStructure=STRUCT_NONE; w.Build(STRUCT_RADAR,25,15); w.AI.CurBuildings=w.AI.AIMaxBuildings;
+        check(w.AI.AI_Essential_Building()==STRUCT_SOVIET_TECH,"a lost known technology center recovers after its radar prerequisite");
+        AIExpansion::Reset();
+        check(w.AI.AI_Essential_Building()==STRUCT_SOVIET_TECH,"a capped loaded base can recover legal technology without transient pre-load history");
+        w.AI.IsHuman=true;
+        check(w.AI.AI_Essential_Building()==STRUCT_NONE,"essential recovery does not commandeer human construction");
+        w.AI.IsHuman=false; Session.Type=GAME_NORMAL;
+        check(w.AI.AI_Essential_Building()==STRUCT_NONE,"essential recovery does not replace campaign build scripts");
     }
     std::cout<<checks<<" actual economic expansion, MCV, refinery and production scenarios passed.\n";
 }

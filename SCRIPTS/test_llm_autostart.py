@@ -1,6 +1,7 @@
 """Exercise native INI detection and the packaged EXE without API calls."""
 from pathlib import Path
 import ctypes
+from datetime import datetime, timezone
 import json
 import mmap
 import os
@@ -172,6 +173,9 @@ class AutomaticBridge(unittest.TestCase):
         status = next(self.directory.glob("log/bridge_*.log")).read_text(encoding="utf-8")
         self.assertIn("LLM bridge ready", status)
         self.assertIn("Bridge stopped", status)
+        for line in status.splitlines():
+            self.assertTrue(line.startswith("["), line)
+            self.assertEqual(datetime.fromisoformat(line[1:line.index("]")]).tzinfo, timezone.utc)
         self.assertNotIn("authorization", status)
 
     def test_missing_portable_exe_keeps_native_control_and_logs_failure(self):

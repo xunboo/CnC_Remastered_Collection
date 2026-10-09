@@ -7,7 +7,6 @@ report. --wait-config waits for the user to finish the INI file first.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import queue
@@ -17,13 +16,14 @@ import threading
 import time
 
 import llm_bridge as bridge
+from llm_audit import log_status, utc_timestamp
 from llm_config import ConfigError, DEFAULT_CONFIG, load_config, validate_config
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("hold", "attack_target", "defend_area")
 
 
-def expected_plan(snapshot, action):
+def expected_plan(snapshot, action, config=None):
     target = None
     if action == "attack_target":
         target = next((candidate["id"] for candidate in snapshot["target_candidates"]
@@ -31,10 +31,10 @@ def expected_plan(snapshot, action):
         if target is None:
             raise bridge.BridgeError("test fixture has no compatible power target")
     return {
-        "protocol_version": 1, "match_id": snapshot["match_id"],
+        "protocol_version": bridge.PROTOCOL_VERSION, "match_id": snapshot["match_id"],
         "based_on_snapshot_seq": snapshot["snapshot_seq"],
         "controlled_house_id": snapshot["controlled_house_id"],
-        "expires_at_frame": snapshot["sim_frame"] + bridge.MAX_PLAN_TICKS,
+        "valid_for_ticks": bridge.plan_tick_limit(config) if config is not None else bridge.MAX_PLAN_TICKS,
         "orders": [{"action": action, "group_id": "ground", "target_id": target,
                     "destination_cell": [35, 80] if action == "defend_area" else None,
                     "commit_percent": 100 if action == "hold" else 75,
@@ -68,15 +68,15 @@ def run_case(config, action, executable, attempts=3, requester=bridge.request_pl
     child = subprocess.Popen([str(executable), "--llm-pipe", action], cwd=executable.parent,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True)
-    result = {"case": action, "passed": False, "attempts": []}
+    result = {"case": action, "started_at": utc_timestamp(), "passed": False, "attempts": []}
     try:
         snapshot = read_snapshot(child)
-        expected = expected_plan(snapshot, action)
+        expected = expected_plan(snapshot, action, config)
         instructions = test_instructions(expected)
         accepted = None
         for attempt in range(1, attempts + 1):
             start = time.monotonic()
-            entry = {"attempt": attempt}
+            entry = {"attempt": attempt, "started_at": utc_timestamp()}
             metadata = {}
             try:
                 plan = requester(snapshot, config=config, instructions=instructions, metadata=metadata)
@@ -92,6 +92,7 @@ def run_case(config, action, executable, attempts=3, requester=bridge.request_pl
                 entry.update(passed=False, error=reason)
                 instructions += "\nThe preceding call failed local validation: " + reason + ". Follow the exact arguments above."
             entry["elapsed_seconds"] = round(time.monotonic() - start, 3)
+            entry["completed_at"] = utc_timestamp()
             result["attempts"].append(entry)
             if accepted is not None:
                 break
@@ -121,6 +122,7 @@ def run_case(config, action, executable, attempts=3, requester=bridge.request_pl
         if child.poll() is None:
             child.kill()
             child.communicate(timeout=10)
+        result["completed_at"] = utc_timestamp()
 
 
 def wait_for_config(path, wait_seconds, timeout_override=None):
@@ -133,7 +135,7 @@ def wait_for_config(path, wait_seconds, timeout_override=None):
             if wait_seconds <= 0:
                 raise
             if not announced:
-                print("Waiting for a complete llm.ini; no API requests have been sent.", flush=True)
+                log_status("Waiting for a complete llm.ini; no API requests have been sent.")
                 announced = True
             if time.monotonic() >= deadline:
                 raise ConfigError("configuration wait timed out; save llm.ini and run the test again") from None
@@ -157,32 +159,33 @@ def main():
         parser.error("timeout must be between 1 and 120 seconds")
     config = wait_for_config(args.config, args.wait_seconds if args.wait_config else 0, args.timeout)
     validate_config(config)
-    print("Configuration is ready; credentials will not be printed or saved in the report.", flush=True)
+    log_status("Configuration is ready; credentials will not be printed or saved in the report.")
     if not args.skip_build:
         subprocess.run([sys.executable, str(ROOT / "SCRIPTS/test_redalert_ai.py"), "--test", "tactics_test"],
                        cwd=ROOT, check=True, timeout=60)
     executable = ROOT / "build/ai-tests/tactics_test.exe"
     if not executable.is_file():
         raise ConfigError("native fixture is missing; run without --skip-build")
-    report = {"started_at": datetime.now(timezone.utc).isoformat(), "protocol": config.protocol,
+    report = {"started_at": utc_timestamp(), "protocol": config.protocol,
               "requested_model": config.model, "real_api": True, "controlled_fixture": True, "cases": []}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     for action in args.case or CASES:
-        print("Testing real function call and C++ execution: " + action, flush=True)
+        log_status("Testing real function call and C++ execution: " + action)
         result = run_case(config, action, executable, args.attempts)
         report["cases"].append(result)
         report["passed"] = False
         report["completed"] = False
         args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        print(("PASS: " if result["passed"] else "FAIL: ") + action, flush=True)
+        log_status(("PASS: " if result["passed"] else "FAIL: ") + action)
         if not result["passed"]:
             if result["attempts"]:
-                print(result["attempts"][-1].get("error", result.get("error", "verification failed")), flush=True)
+                log_status(result["attempts"][-1].get("error", result.get("error", "verification failed")))
             break
     report["completed"] = len(report["cases"]) == len(args.case or CASES)
     report["passed"] = report["completed"] and all(case["passed"] for case in report["cases"])
+    report["completed_at"] = utc_timestamp()
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print("Secret-free test report: " + str(args.report), flush=True)
+    log_status("Secret-free test report: " + str(args.report))
     return 0 if report["passed"] else 1
 
 
@@ -190,11 +193,11 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (ConfigError, bridge.BridgeError) as error:
-        print(str(error), file=sys.stderr)
+        log_status(str(error), file=sys.stderr)
         sys.exit(1)
     except (OSError, subprocess.SubprocessError):
-        print("Native fixture could not be built or started.", file=sys.stderr)
+        log_status("Native fixture could not be built or started.", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("Real LLM test stopped.", file=sys.stderr)
+        log_status("Real LLM test stopped.", file=sys.stderr)
         sys.exit(130)

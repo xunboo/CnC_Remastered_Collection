@@ -32,7 +32,7 @@ int Frame=0, ScenarioInit=0;
 struct { int Type=1; } Session;
 struct {
     bool HarvesterOptimizeEnabled=true, HarvesterLoadBalancing=true, HarvesterQueueJumpingEnabled=true;
-    bool AstarPathFindingEnabled=true, IsAutoCrush=true;
+    bool AstarPathFindingEnabled=true, IsAutoCrush=true, GemOverLoadFixEnabled=true;
     int HarvyOptimizeUnloadWaitWeight=6, AIHarvesterMemoryValue=100;
     int TiberiumLongScan=40*256, TiberiumShortScan=8*256, OreDumpRate=1;
     int GoldValue=25, GemValue=50, BailCount=28;
@@ -99,7 +99,7 @@ public:
     FakeTeam Team;
     bool IsTethered=false, IsDumping=false, IsHarvesting=false, IsDriving=false, AttackMove=false;
     bool IsOwnedByPlayer=false, IsUseless=false;
-    int Mission=MISSION_HARVEST, MissionQueue=MISSION_NONE, Status=0, ID=0, Tiberium=0, Rate=0, Stage=0;
+    int Mission=MISSION_HARVEST, MissionQueue=MISSION_NONE, Status=0, ID=0, Tiberium=0, Gold=0, Gems=0, Rate=0, Stage=0;
     TARGET NavCom=0, TarCom=0, ArchiveTarget=0;
     mutable TARGET TiberiumUnloadRefinery=0;
     operator int() const { return Class->Type; }
@@ -116,7 +116,7 @@ public:
     double Tiberium_Load() const { return double(Tiberium)/Rule.BailCount; }
     double Health_Ratio() const { return Class->MaxStrength>0?double(Strength)/Class->MaxStrength:0; }
     int Pip_Count() const { return Tiberium*5/Rule.BailCount; }
-    bool Harvesting() { return false; }
+    bool Harvesting();
     CELL Nearby_Location(TechnoClass const * object) const { return Coord_Cell(object->Coord); }
     int Transmit_Message(int message,BuildingClass * refinery) {
         if(message==RADIO_HELLO && !refinery->Attached && (!refinery->Contact || refinery->Contact==this)) {
@@ -168,7 +168,19 @@ struct FakeCell {
     bool Is_Clear_To_Move(int,bool,bool,int,int) const { return Clear; }
     BuildingClass * Cell_Building() const { return Building; }
     TechnoClass * Cell_Techno() const { return Occupant?Occupant:Building; }
+    int Reduce_Tiberium(int levels) {
+        if(Land!=LAND_TIBERIUM || levels<=0) return 0;
+        int taken=min(levels,OverlayData+1); OverlayData-=taken;
+        if(OverlayData<0) { OverlayData=0; Overlay=OVERLAY_NONE; Land=LAND_CLEAR; }
+        return taken;
+    }
+    bool DumpOreHere() {
+        if(Land!=LAND_TIBERIUM) { Land=LAND_TIBERIUM; Overlay=OVERLAY_GOLD1; OverlayData=0; }
+        else ++OverlayData;
+        return true;
+    }
 };
+typedef FakeCell CellClass;
 struct {
     FakeCell Cells[MAP_CELL_TOTAL];
     int MapCellX=0, MapCellY=0, MapCellWidth=128, MapCellHeight=128;
@@ -231,6 +243,58 @@ int main() {
     {
         World w; auto u=w.Truck(20,20); w.Ore(23,20,false,1); w.Ore(24,20,false,12);
         u->Goto_Tiberium(40); check(u->NavCom==As_Target(XY_Cell(24,20)),"dense ore wins within the nearby distance band");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true,0);
+        check(!u->Goto_Tiberium(40) && u->NavCom==As_Target(XY_Cell(22,20)),
+            "a truck already on ordinary ore chooses nearby gems before mining");
+    }
+    for(int overlay=OVERLAY_GEMS1;overlay<=OVERLAY_GEMS4;++overlay) {
+        World w; auto u=w.Truck(20,20); w.Ore(23,20,false,12); w.Ore(24,20,true,0);
+        Map[XY_Cell(24,20)].Overlay=overlay;
+        u->Goto_Tiberium(40);
+        check(u->NavCom==As_Target(XY_Cell(24,20)),
+            "nearby low-density gems beat a larger ordinary ore stockpile for every gem overlay");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20,false,0); w.Ore(21,20,false,12);
+        check(!u->Goto_Tiberium(40) && u->NavCom==As_Target(XY_Cell(21,20)),
+            "a truck on sparse ordinary ore can choose a substantially richer adjacent cell");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20,true,0); w.Ore(21,20,false,12);
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "a truck already on gems does not move to a thicker but lower-yield ordinary ore cell");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20,false,11); w.Ore(21,20,false,12);
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "small ordinary ore density gains do not interrupt ongoing mining");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(23,20,true);
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "a truck already mining does not chase gems outside the nearby route band");
+        w.Ore(22,20,true);
+        check(u->Goto_Tiberium(1) && u->NavCom==TARGET_NONE,
+            "a disabled native scan still permits mining the current cell");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true);
+        for(int y=0;y<128;++y) w.Wall(21,y);
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "ongoing mining rejects nearby gems with no reachable ground route");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true); w.Truck(22,20);
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "ongoing mining does not send a truck onto another truck's gem cell");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true);
+        u->IsOwnedByPlayer=true; Session.Type=GAME_NORMAL; Map[XY_Cell(22,20)].Mapped=false;
+        check(u->Goto_Tiberium(40) && u->NavCom==TARGET_NONE,
+            "ongoing campaign-human mining cannot discover gems through unexplored shroud");
     }
     {
         World w; auto u=w.Truck(20,20); w.Ore(23,20,true); w.Ore(20,24);
@@ -417,6 +481,71 @@ int main() {
         check(Target_Legal(u->NavCom),"stalled-route checks preserve queued player orders");
         u->MissionQueue=MISSION_NONE; HarvestAI::Forget(u); Frame+=TICKS_PER_SECOND; u->Harvest_Think();
         check(Target_Legal(u->NavCom),"a reused unit slot starts with fresh transient route timing");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20);
+        u->Status=1; u->IsHarvesting=true; u->Tiberium=u->Gold=3;
+        u->Rate=Rule.OreDumpRate;
+        u->ArchiveTarget=As_Target(XY_Cell(20,20));
+        u->Harvest_Think(); u->Stage=ARRAY_SIZE(HarvesterType.Harvester_Load_List); u->Mission_Harvest();
+        check(u->Tiberium==4 && u->Gold==4 && Map[XY_Cell(20,20)].OverlayData==11,
+            "the actual native harvesting state still consumes ordinary ore between periodic checks");
+        w.Ore(22,20,true,0); Frame=2*TICKS_PER_SECOND; u->Harvest_Think();
+        check(u->NavCom==TARGET_NONE && u->Status==1,
+            "new rich ore waits for the three-second periodic scan rather than rescanning every tick");
+        Frame=3*TICKS_PER_SECOND; u->Harvest_Think();
+        check(u->NavCom==As_Target(XY_Cell(22,20)) && u->Status==0 && !u->IsHarvesting,
+            "a mining truck notices newly available nearby gems before its ordinary ore cell is exhausted");
+        check(u->Tiberium==4 && u->Gold==4 && u->Gems==0 && u->ArchiveTarget==TARGET_NONE,
+            "rich-ore retargeting preserves partial cargo and clears the stale mining archive");
+        u->Mission_Harvest();
+        check(u->NavCom==As_Target(XY_Cell(22,20)) && u->Tiberium==4,
+            "the native looking state preserves the rich-ore route while travelling");
+        w.Move(u,22,20); u->NavCom=TARGET_NONE; u->Mission_Harvest();
+        check(u->IsHarvesting && u->Status==1 && u->NavCom==TARGET_NONE,
+            "arrival at the rich cell resumes the actual native harvesting state");
+        u->Stage=ARRAY_SIZE(HarvesterType.Harvester_Load_List); u->Mission_Harvest();
+        check(u->Tiberium==8 && u->Gold==4 && u->Gems==4 && Map[XY_Cell(22,20)].Land==LAND_CLEAR,
+            "the actual native harvest step collects four gem bails without discarding prior ordinary ore");
+        u->Stage=ARRAY_SIZE(HarvesterType.Harvester_Load_List); u->Mission_Harvest();
+        check(u->NavCom==As_Target(XY_Cell(20,20)) && u->Tiberium==8,
+            "exhausted nearby gems fall back to reachable ordinary ore while retaining cargo");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true);
+        u->Status=1; u->IsHarvesting=true; u->Tiberium=u->Gold=Rule.BailCount;
+        u->Rate=Rule.OreDumpRate;
+        u->Harvest_Think();
+        check(u->NavCom==TARGET_NONE && u->Status==1 && u->Tiberium==Rule.BailCount,
+            "full mining trucks do not start a new rich-ore trip");
+        u->Stage=ARRAY_SIZE(HarvesterType.Harvester_Load_List); u->Mission_Harvest();
+        check(u->Status==2 && !u->IsHarvesting,
+            "a full truck still enters the native refinery-return state instead of seeking nearby gems");
+    }
+    for(int protected_order=0;protected_order<8;++protected_order) {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true);
+        u->Status=1; u->IsHarvesting=true; u->Tiberium=u->Gold=4;
+        switch(protected_order) {
+            case 0: u->Mission=MISSION_MOVE; break;
+            case 1: u->MissionQueue=MISSION_MOVE; break;
+            case 2: u->Mission=MISSION_REPAIR; break;
+            case 3: u->Team.Assigned=true; break;
+            case 4: u->IsTethered=true; break;
+            case 5: u->IsDumping=true; break;
+            case 6: Rule.HarvesterOptimizeEnabled=false; break;
+            case 7: u->IsDriving=true; break;
+        }
+        u->Harvest_Think();
+        check(u->NavCom==TARGET_NONE && u->Status==1 && u->Tiberium==4 && u->Gold==4,
+            "periodic rich-ore scans preserve protected missions, queued commands, scripted teams, docking, unloading, legacy mode and movement");
+    }
+    {
+        World w; auto u=w.Truck(20,20); w.Ore(20,20); w.Ore(22,20,true);
+        auto refinery=w.Refinery(23,20); refinery->Attached=true;
+        u->Status=2; u->Tiberium=4; u->TiberiumUnloadRefinery=refinery->As_Target();
+        u->NavCom=As_Target(XY_Cell(20,21)); u->Harvest_Think();
+        check(u->Status==2 && u->NavCom==As_Target(XY_Cell(20,21)) && u->TiberiumUnloadRefinery==refinery->As_Target(),
+            "a partial-load refinery return is not diverted toward nearby gems");
     }
 
     {

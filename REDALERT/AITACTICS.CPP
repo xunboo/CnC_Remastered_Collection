@@ -35,6 +35,10 @@ struct Contact {
     bool Naval;
     bool Air;
 };
+struct FrontlineMember {
+    TARGET Target;
+    unsigned int Generation;
+};
 struct StrikePlan {
     StrikePhase Phase;
     TARGET Target;
@@ -47,6 +51,8 @@ struct StrikePlan {
     int GatheredPower;
     int TargetScore;
     int RetargetFrame;
+    int TargetDefense;
+    int TargetResponse;
     bool AllOut;
     bool Forced;
     StrikeIntent Intent;
@@ -55,10 +61,13 @@ struct StrikePlan {
     bool External;
     TARGET BattleTarget;
     std::vector<TARGET> Members;
+    std::vector<TARGET> Marchers;
+    std::vector<FrontlineMember> FrontlineReserve;
+    int FrontlineCell;
     std::vector<int> Route;
     RouteMap Field;
     StrikePlan() : Phase(STRIKE_HOLD), Target(TARGET_NONE), Enemy(-1), Home(0),
-        Waypoint(0), Step(0), ProgressFrame(0), NextAttempt(0), GatheredPower(0), TargetScore(0), RetargetFrame(0), AllOut(false), Forced(false), Intent(STRIKE_NORMAL), Fighting(false), Resume(false), External(false), BattleTarget(TARGET_NONE), Field(MAP_CELL_W, MAP_CELL_H) {}
+        Waypoint(0), Step(0), ProgressFrame(0), NextAttempt(0), GatheredPower(0), TargetScore(0), RetargetFrame(0), TargetDefense(0), TargetResponse(0), AllOut(false), Forced(false), Intent(STRIKE_NORMAL), Fighting(false), Resume(false), External(false), BattleTarget(TARGET_NONE), FrontlineCell(-1), Field(MAP_CELL_W, MAP_CELL_H) {}
 };
 struct TacticalState {
     HouseClass * Owner;
@@ -286,21 +295,123 @@ static void Release_Formation(TARGET target, HouseClass * house)
         && !((FootClass *)object)->Team) ((FootClass *)object)->IsFormationMove = false;
 }
 
-static void Cancel(StrikePlan & plan, HouseClass * house, std::vector<TARGET> const * protected_units = NULL)
+static int Frontline_Cell(std::vector<TARGET> const & members, HouseClass * house,
+    std::vector<TARGET> const * protected_units = NULL)
 {
-    bool active = plan.Phase != STRIKE_HOLD;
-    if (active) AILog::Record(Frame, house->Class->House, "strike_cancel",
-        AILog::Fields().Number("target", plan.Target).Number("members", plan.Members.size()).Number("phase", plan.Phase)
-            .Boolean("external", plan.External).Boolean("forced", plan.Forced));
+    std::vector<int> cells, xs, ys;
+    for (unsigned int i = 0; i < members.size(); ++i) {
+        if (protected_units && Contains(*protected_units, members[i])) continue;
+        FootClass * unit = Member(members[i], house);
+        if (!unit) continue;
+        int cell = Coord_Cell(unit->Center_Coord());
+        cells.push_back(cell); xs.push_back(cell % MAP_CELL_W); ys.push_back(cell / MAP_CELL_W);
+    }
+    if (cells.empty()) return -1;
+    std::sort(xs.begin(), xs.end()); std::sort(ys.begin(), ys.end());
+    int center = ys[ys.size() / 2] * MAP_CELL_W + xs[xs.size() / 2];
+    int best = cells[0];
+    for (unsigned int i = 1; i < cells.size(); ++i) {
+        int distance = (std::max)(abs(cells[i] % MAP_CELL_W - center % MAP_CELL_W), abs(cells[i] / MAP_CELL_W - center / MAP_CELL_W));
+        int old_distance = (std::max)(abs(best % MAP_CELL_W - center % MAP_CELL_W), abs(best / MAP_CELL_W - center / MAP_CELL_W));
+        if (distance < old_distance) best = cells[i];
+    }
+    // Use a real occupied cell, not a median that might lie in water or a wall.
+    return best;
+}
+
+static bool Frontline_Reserve(StrikePlan const & plan, TARGET target, HouseClass * house)
+{
+    for (unsigned int i = 0; i < plan.FrontlineReserve.size(); ++i) {
+        FrontlineMember const & member = plan.FrontlineReserve[i];
+        if (member.Target == target && member.Generation == LLMBridge::Object_Generation(target)
+            && Member(target, house)) return true;
+    }
+    return false;
+}
+
+static int Remembered_Frontline(StrikePlan const & plan, HouseClass * house,
+    std::vector<TARGET> const * protected_units = NULL)
+{
+    std::vector<TARGET> survivors, stationed;
+    for (unsigned int i = 0; i < plan.FrontlineReserve.size(); ++i) {
+        TARGET target = plan.FrontlineReserve[i].Target;
+        if (protected_units && Contains(*protected_units, target)) continue;
+        if (!Frontline_Reserve(plan, target, house)) continue;
+        survivors.push_back(target);
+        if (plan.Field.Separation(Coord_Cell(Member(target, house)->Center_Coord()), plan.FrontlineCell) <= 12)
+            stationed.push_back(target);
+    }
+    return Frontline_Cell(stationed.empty() ? survivors : stationed, house);
+}
+
+static int Strike_Frontline(StrikePlan const & plan, HouseClass * house, std::vector<TARGET> const & defenders)
+{
+    int frontline = Frontline_Cell(plan.Marchers, house, &defenders);
+    if (frontline >= 0) return frontline;
+    std::vector<TARGET> arrived;
+    for (unsigned int i = 0; i < plan.Members.size(); ++i) {
+        FootClass * unit = Member(plan.Members[i], house);
+        if (unit && !Contains(defenders, plan.Members[i])
+            && plan.Field.Separation(Coord_Cell(unit->Center_Coord()), plan.Waypoint) <= 6) arrived.push_back(plan.Members[i]);
+    }
+    return Frontline_Cell(arrived.empty() ? plan.Members : arrived, house, &defenders);
+}
+
+static AILog::Fields Cancel_Fields(StrikePlan const & plan, HouseClass * house, char const * reason, int frontline)
+{
+    int count = 0, power = 0, ready = 0, ready_power = 0;
+    int radius = 3;
+    for (unsigned int i = 0; i < plan.Members.size(); ++i) {
+        FootClass * unit = Member(plan.Members[i], house);
+        if (!unit) continue;
+        ++count; power += Power(unit);
+        if (plan.Field.Separation(Coord_Cell(unit->Center_Coord()), plan.Waypoint) <= radius) {
+            ++ready; ready_power += Power(unit);
+        }
+    }
+    return AILog::Fields().Text("reason", reason).Number("target", plan.Target)
+        .Number("members", plan.Members.size()).Number("live_members", count).Number("phase", plan.Phase)
+        .Number("power", power).Number("ready_count", ready).Number("ready_power", ready_power)
+        .Number("target_defense", plan.TargetDefense).Number("enemy_response", plan.TargetResponse)
+        .Number("batch_members", plan.Marchers.size()).Number("waypoint", plan.Waypoint)
+        .Number("home", plan.Home).Number("ready_radius", radius)
+        .Number("route_step", plan.Step).Number("route_length", plan.Route.size())
+        .Number("progress_wait_ticks", (std::max)(0LL, (long long)Frame - plan.ProgressFrame))
+        .Number("frontline_cell", frontline).Boolean("frontline_preserved", frontline >= 0)
+        .Boolean("external", plan.External).Boolean("forced", plan.Forced);
+}
+
+static void Cancel(StrikePlan & plan, HouseClass * house, char const * reason,
+    std::vector<TARGET> const * protected_units = NULL)
+{
+    if (plan.Phase == STRIKE_HOLD) return;
+    std::vector<TARGET> empty;
+    int frontline = Strike_Frontline(plan, house, protected_units ? *protected_units : empty);
+    if (frontline < 0) frontline = Remembered_Frontline(plan, house, protected_units);
+    AILog::Record(Frame, house->Class->House, "strike_cancel", Cancel_Fields(plan, house, reason, frontline));
+    std::vector<FrontlineMember> held;
+    for (unsigned int i = 0; i < plan.FrontlineReserve.size(); ++i) {
+        FrontlineMember const & member = plan.FrontlineReserve[i];
+        if ((!protected_units || !Contains(*protected_units, member.Target))
+            && Frontline_Reserve(plan, member.Target, house)) held.push_back(member);
+    }
     for (unsigned int i = 0; i < plan.Members.size(); ++i) {
         if (protected_units && Contains(*protected_units, plan.Members[i])) continue;
         FootClass * unit = Member(plan.Members[i], house);
-        if (unit) Guard(unit);
+        if (unit) {
+            Guard(unit);
+            if (!Frontline_Reserve(plan, plan.Members[i], house)) {
+                FrontlineMember member = {plan.Members[i], LLMBridge::Object_Generation(plan.Members[i])};
+                held.push_back(member);
+            }
+        }
         else Release_Formation(plan.Members[i], house);
     }
     plan = StrikePlan();
+    plan.FrontlineReserve.swap(held);
+    plan.FrontlineCell = frontline;
     plan.NextAttempt = Frame + TICKS_PER_SECOND * 5;
-    if (active) house->AI_Replan_Attack();
+    house->AI_Replan_Attack();
 }
 
 static int Nearby_Power(std::vector<Contact> const & contacts, RouteMap const & field, int cell, bool air = false)
@@ -644,20 +755,32 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     StrikeIntent intent = STRIKE_NORMAL, bool forced = false, TARGET specified_target = TARGET_NONE, int commit_percent = 0)
 {
     if (Frame < plan.NextAttempt) return false;
+    TacticalState const & state = TacticalStates[house->Class->House];
+    StrikePlan const & previous = air ? state.Air : naval ? state.Fleet : state.Ground;
+    int remembered = Remembered_Frontline(previous, house, &defenders);
+    if (remembered < 0 && previous.Phase != STRIKE_HOLD) remembered = Strike_Frontline(previous, house, defenders);
+    int selection_front = rally >= 0 ? rally : remembered;
     FootClass * representative = NULL;
     int largest = -1, available_count = 0;
     for (unsigned int i = 0; i < army.size(); ++i) {
         Fighter const & fighter = army[i];
         if (fighter.Naval != naval || fighter.Air != air || Contains(defenders, fighter.Object->As_Target())) continue;
         ++available_count;
-        // A ground vehicle leads the path search even if a Tanya costs more.
+        // Nearby ground vehicles lead a resumed route; a valuable new unit at
+        // the base must not pull the search away from a surviving front.
         int priority = fighter.Power + (fighter.Object->What_Am_I() == RTTI_UNIT ? 100000 : 0);
-        if (priority > largest) { representative = fighter.Object; largest = priority; }
+        int distance = selection_front < 0 ? 0 : previous.Field.Separation(fighter.Cell, selection_front) / 6;
+        int old_distance = !representative || selection_front < 0 ? 0
+            : previous.Field.Separation(Coord_Cell(representative->Center_Coord()), selection_front) / 6;
+        if (!representative || distance < old_distance || (distance == old_distance && priority > largest)) {
+            representative = fighter.Object; largest = priority;
+        }
     }
     if (!representative || available_count < (air || forced ? 1 : 4)) return false;
     int origin = Coord_Cell(representative->Center_Coord());
     RouteMap field(MAP_CELL_W, MAP_CELL_H);
     Fill_Routes(field, representative, origin);
+    if (rally < 0 && remembered >= 0) rally = remembered;
     int home = naval || continuing || !house->Center ? origin : field.Approach(Coord_Cell(house->Center), 8);
     if (rally >= 0) {
         home = field.Approach(rally, 3);
@@ -673,8 +796,9 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
             recruits.push_back(fighter);
     }
     // Keep the units closest to the base as a reaction reserve.
-    std::stable_sort(recruits.begin(), recruits.end(), [&field, home](Fighter const & a, Fighter const & b) {
-        return field.Separation(a.Cell, home) < field.Separation(b.Cell, home);
+    int reserve_cell = !naval && !air && house->Center ? Coord_Cell(house->Center) : home;
+    std::stable_sort(recruits.begin(), recruits.end(), [&field, reserve_cell](Fighter const & a, Fighter const & b) {
+        return field.Separation(a.Cell, reserve_cell) < field.Separation(b.Cell, reserve_cell);
     });
     int total = 0;
     for (unsigned int i = 0; i < recruits.size(); ++i) total += recruits[i].Power;
@@ -690,7 +814,7 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     }
     home = Rally_Cell(field, home, (int)recruits.size() - first);
     Contact const * chosen = NULL;
-    int approach = -1, best = 0;
+    int approach = -1, best = 0, chosen_defense = 0, chosen_response = 0;
     // Strong defenses along the march make a detour preferable to a frontal crossing.
     Threat_Costs(field, contacts, total - reserved, air);
     field.Search(home);
@@ -717,7 +841,10 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
             .Number("response", response).Number("distance", field.Distance[cell]).Boolean("ready", ready).Boolean("route_safe", safe));
         if (!ready || !safe) continue;
         int score = Strike_Score(contact, intent, (std::max)(defense, response), field.Distance[cell]);
-        if (!chosen || score > best) { chosen = &contact; approach = cell; best = score; }
+        if (!chosen || score > best) {
+            chosen = &contact; approach = cell; best = score;
+            chosen_defense = defense; chosen_response = response;
+        }
     }
     plan.NextAttempt = Frame + TICKS_PER_SECOND * 5;
     if (!chosen) {
@@ -732,6 +859,8 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     plan.Target = chosen->Object->As_Target();
     plan.TargetScore = best;
     plan.RetargetFrame = Frame;
+    plan.TargetDefense = chosen_defense;
+    plan.TargetResponse = chosen_response;
     plan.Enemy = chosen->Owner;
     plan.Home = home;
     plan.Waypoint = home;
@@ -739,13 +868,17 @@ static bool Start_Strike(StrikePlan & plan, HouseClass * house, std::vector<Figh
     plan.ProgressFrame = Frame;
     plan.Route = field.Path(approach);
     plan.Field = field;
+    plan.FrontlineReserve = previous.FrontlineReserve;
+    plan.FrontlineCell = remembered;
+    plan.Members.clear(); plan.Marchers.clear();
     for (int i = first; i < (int)recruits.size(); ++i) {
         if (Can_Hit(recruits[i].Object, *chosen)) plan.Members.push_back(recruits[i].Object->As_Target());
     }
     AILog::Record(Frame, house->Class->House, "strike_started", AILog::Fields().Number("target", plan.Target)
         .Number("score", best).Number("home", home).Number("approach", approach).Number("members", plan.Members.size())
         .Number("route_length", plan.Route.size()).Boolean("naval", naval).Boolean("air", air)
-        .Boolean("forced", forced).Boolean("all_out", all_out).Number("intent", intent).Number("commit_percent", commit_percent));
+        .Boolean("forced", forced).Boolean("all_out", all_out).Number("intent", intent).Number("commit_percent", commit_percent)
+        .Boolean("resumed_frontline", remembered >= 0).Number("frontline_cell", remembered));
     if (air) {
         for (unsigned int i = 0; i < plan.Members.size(); ++i) {
             AircraftClass * aircraft = (AircraftClass *)Member(plan.Members[i], house);
@@ -772,8 +905,9 @@ static bool Retarget_Strike(StrikePlan & plan, HouseClass * house, std::vector<C
         survivors.push_back(fighter);
     }
     StrikePlan next;
+    int rally = Strike_Frontline(plan, house, defenders);
     if (survivors.empty() || !Start_Strike(next, house, survivors, contacts, defenders,
-        survivors[0].Naval, survivors[0].Air, true, plan.AllOut, -1, plan.Intent, plan.Forced) || next.Target == plan.Target) return false;
+        survivors[0].Naval, survivors[0].Air, true, plan.AllOut, rally, plan.Intent, plan.Forced) || next.Target == plan.Target) return false;
     // Ignore small score changes so an advancing force does not oscillate.
     if (!required && next.TargetScore < current_score + (std::max)(512, abs(current_score % 500000) / 3)) return false;
     for (unsigned int i = 0; i < plan.Members.size(); ++i) {
@@ -786,6 +920,75 @@ static bool Retarget_Strike(StrikePlan & plan, HouseClass * house, std::vector<C
     return true;
 }
 
+static bool March_Ready(StrikePlan & plan, HouseClass * house, std::vector<Contact> const & contacts)
+{
+    std::vector<TARGET> present, batch;
+    int ready = 0, power = 0, batch_power = 0;
+    int radius = Formation_Width(AITactics::MarchBatchSize) / 2 + 1;
+    for (unsigned int i = 0; i < plan.Members.size(); ++i) {
+        FootClass * unit = Member(plan.Members[i], house);
+        if (!unit) continue;
+        if (plan.Field.Separation(Coord_Cell(unit->Center_Coord()), plan.Waypoint) > radius) continue;
+        present.push_back(plan.Members[i]);
+        if (Contains(plan.Marchers, plan.Members[i])) { ++ready; power += Power(unit); }
+    }
+    for (unsigned int i = 0; i < plan.Marchers.size(); ++i) {
+        FootClass * unit = Member(plan.Marchers[i], house);
+        if (unit && Contains(plan.Members, plan.Marchers[i])) { batch.push_back(plan.Marchers[i]); batch_power += Power(unit); }
+    }
+    bool cohesive = AITactics::Cohesion_Ready((int)batch.size(), ready, batch_power, power);
+    bool sufficient = Strike_Ready(ready, power, plan.TargetResponse, plan.TargetDefense, false, plan.Forced);
+    bool route_safe = plan.Forced || (!plan.Route.empty() && Safe_Strike_Route(plan.Field, contacts, plan.Route.back(), power, false));
+    if (cohesive && sufficient && route_safe && AITactics::March_Batch_Ready((int)plan.Members.size(), ready, power)) {
+        plan.Marchers.swap(batch);
+        return true;
+    }
+    // A new recruit never enlarges the current batch's waiting denominator.
+    // Other arrivals can form the next batch if the old batch has stragglers.
+    batch.clear(); batch_power = 0;
+    std::stable_sort(present.begin(), present.end(), [house](TARGET a, TARGET b) {
+        return Power(Member(a, house)) > Power(Member(b, house));
+    });
+    bool safe = false;
+    for (unsigned int i = 0; i < present.size(); ++i) {
+        batch.push_back(present[i]); batch_power += Power(Member(present[i], house));
+        if (!AITactics::March_Batch_Ready((int)plan.Members.size(), (int)batch.size(), batch_power)
+            || !Strike_Ready((int)batch.size(), batch_power, plan.TargetResponse, plan.TargetDefense, false, plan.Forced)) continue;
+        if (!plan.Forced && (plan.Route.empty()
+            || !Safe_Strike_Route(plan.Field, contacts, plan.Route.back(), batch_power, false))) continue;
+        safe = true;
+        // Twelve is the usual batch size. A stronger target can require more.
+        if ((int)batch.size() >= AITactics::MarchBatchSize) break;
+    }
+    if (!safe) return false;
+    plan.Marchers.swap(batch);
+    AILog::Record(Frame, house->Class->House, "strike_batch_ready", AILog::Fields()
+        .Number("target", plan.Target).Number("members", plan.Members.size()).Number("batch_members", plan.Marchers.size())
+        .Number("batch_power", batch_power).Number("waiting_members", plan.Members.size() - plan.Marchers.size())
+        .Number("waypoint", plan.Waypoint).Boolean("forced", plan.Forced));
+    return true;
+}
+
+static int Formation_Slot(RouteMap const & field, int desired, int width, std::map<int, bool> & occupied)
+{
+    int slot = field.Approach(desired, 2);
+    if (slot < 0) return -1;
+    if (occupied.find(slot) == occupied.end()) { occupied[slot] = true; return slot; }
+    for (int radius = 1; radius <= width; ++radius) {
+        int sx = slot % MAP_CELL_W, sy = slot / MAP_CELL_W;
+        for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
+            if (abs(dx) != radius && abs(dy) != radius) continue;
+            int x = sx + dx, y = sy + dy;
+            if (x < 0 || x >= MAP_CELL_W || y < 0 || y >= MAP_CELL_H) continue;
+            int candidate = y * MAP_CELL_W + x;
+            if (field.Clear[candidate] && field.Distance[candidate] >= 0 && occupied.find(candidate) == occupied.end()) {
+                occupied[candidate] = true; return candidate;
+            }
+        }
+    }
+    return -1;
+}
+
 static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Contact> const & contacts,
     std::vector<TARGET> const & defenders, bool scan)
 {
@@ -794,16 +997,22 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
     TechnoClass * target = As_Techno(plan.Target);
     if (!Alive(target) || !Opponent(house, target->House) || target->House->Class->House != plan.Enemy) {
         if (!Retarget_Strike(plan, house, contacts, defenders, true, 0)) {
-            Cancel(plan, house); return;
+            char const * reason = !Alive(target) ? "target_destroyed_or_missing"
+                : target->House->Class->House != plan.Enemy ? "target_changed_owner" : "target_owner_no_longer_hostile";
+            Cancel(plan, house, reason, &defenders); return;
         }
         target = As_Techno(plan.Target);
     }
     std::vector<TARGET> remaining;
     int power = 0, ready_power = 0, ready_count = 0;
     FootClass * representative = NULL;
-    MPHType speed = MPH_LIGHT_SPEED;
     int formation_width = Formation_Width((int)plan.Members.size());
-    int radius = formation_width / 2 + 1;
+    bool air_group = false;
+    for (unsigned int i = 0; i < plan.Members.size(); ++i) {
+        FootClass * unit = Member(plan.Members[i], house);
+        if (unit) { air_group = unit->What_Am_I() == RTTI_AIRCRAFT; break; }
+    }
+    int radius = air_group ? formation_width / 2 + 1 : Formation_Width(AITactics::MarchBatchSize) / 2 + 1;
     RouteMap & field = plan.Field;
     for (unsigned int i = 0; i < plan.Members.size(); ++i) {
         FootClass * unit = Member(plan.Members[i], house);
@@ -812,10 +1021,14 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
         remaining.push_back(plan.Members[i]);
         int value = Power(unit);
         power += value;
-        int priority = value + (unit->What_Am_I() == RTTI_UNIT ? 100000 : 0);
-        int old_priority = representative ? Power(representative) + (representative->What_Am_I() == RTTI_UNIT ? 100000 : 0) : -1;
-        if (priority > old_priority) representative = unit;
-        if (unit->Techno_Type_Class()->MaxSpeed < speed) speed = unit->Techno_Type_Class()->MaxSpeed;
+        bool front = Contains(plan.Marchers, plan.Members[i]);
+        bool old_front = representative && Contains(plan.Marchers, representative->As_Target());
+        int distance = field.Separation(Coord_Cell(unit->Center_Coord()), plan.Waypoint);
+        int old_distance = representative ? field.Separation(Coord_Cell(representative->Center_Coord()), plan.Waypoint) : INT_MAX;
+        bool vehicle = unit->What_Am_I() == RTTI_UNIT;
+        bool old_vehicle = representative && representative->What_Am_I() == RTTI_UNIT;
+        if (!representative || (front != old_front ? front : vehicle != old_vehicle ? vehicle
+            : distance != old_distance ? distance < old_distance : value > Power(representative))) representative = unit;
         if (field.Separation(Coord_Cell(unit->Center_Coord()), plan.Waypoint) <= radius) {
             ++ready_count;
             ready_power += value;
@@ -828,7 +1041,8 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
             // Regroup where the battle ended, without returning to a checkpoint
             // that may now be far behind the force.
             plan.Phase = STRIKE_RALLY;
-            plan.Home = plan.Waypoint = Coord_Cell(representative->Center_Coord());
+            int frontline = Strike_Frontline(plan, house, defenders);
+            plan.Home = plan.Waypoint = frontline;
             plan.Step = 0; plan.ProgressFrame = Frame; plan.GatheredPower = 0;
             ready_count = ready_power = 0;
             for (unsigned int i = 0; i < plan.Members.size(); ++i) {
@@ -841,7 +1055,7 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
     }
     if (!representative || (!plan.Forced && AITactics::Should_Withdraw(power, 0,
         Nearby_Power(contacts, field, Coord_Cell(representative->Center_Coord()), representative->What_Am_I() == RTTI_AIRCRAFT)))) {
-        Cancel(plan, house);
+        Cancel(plan, house, representative ? "nearby_enemy_superior" : "no_available_members", &defenders);
         return;
     }
     if (scan) {
@@ -854,11 +1068,15 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
         int destination = field.Approach(target_cell, air ? 1 : (naval ? 6 : 3));
         int defense = Nearby_Power(contacts, field, target_cell, air);
         int response = Enemy_Response(contacts, field, target_cell, naval, air);
-        bool unsafe = destination < 0 || (!plan.Forced
-            && (!Safe_Strike_Route(field, contacts, destination, power, air)
-            || (plan.Phase == STRIKE_ENGAGE
-            ? AITactics::Should_Withdraw(power, response, defense)
-            : !Strike_Ready((int)plan.Members.size(), power, response, defense, air, false))));
+        plan.TargetDefense = defense; plan.TargetResponse = response;
+        char const * unsafe_reason = destination < 0 ? "unreachable_target" : NULL;
+        if (!unsafe_reason && !plan.Forced) {
+            if (!Safe_Strike_Route(field, contacts, destination, power, air)) unsafe_reason = "unsafe_route";
+            else if (plan.Phase == STRIKE_ENGAGE ? AITactics::Should_Withdraw(power, response, defense)
+                : !Strike_Ready((int)plan.Members.size(), power, response, defense, air, false))
+                unsafe_reason = plan.Phase == STRIKE_ENGAGE ? "insufficient_engagement_strength" : "insufficient_target_strength";
+        }
+        bool unsafe = unsafe_reason != NULL;
         int current_score = 0;
         for (unsigned int i = 0; i < contacts.size(); ++i) {
             if (contacts[i].Object == target) {
@@ -872,7 +1090,7 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
                 Update_Strike(plan, house, contacts, defenders, false);
                 return;
             }
-            if (unsafe) { Cancel(plan, house); return; }
+            if (unsafe) { Cancel(plan, house, unsafe_reason, &defenders); return; }
             plan.RetargetFrame = Frame;
         }
         // Rebuild the remaining route when structures/walls change during the march.
@@ -884,14 +1102,17 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
             destination = field.Approach(target_cell, air ? 1 : (naval ? 6 : 3));
             plan.Route = field.Path(destination);
             plan.Step = 0;
-            if (plan.Route.empty()) { Cancel(plan, house); return; }
+            if (plan.Route.empty()) { Cancel(plan, house, "route_rebuild_failed", &defenders); return; }
         }
     }
     if (ready_power > plan.GatheredPower) {
         plan.GatheredPower = ready_power;
         plan.ProgressFrame = Frame;
     }
-    if (plan.Phase != STRIKE_ENGAGE && AITactics::Cohesion_Ready((int)plan.Members.size(), ready_count, power, ready_power)) {
+    bool march_ready = plan.Phase != STRIKE_ENGAGE && (air_group
+        ? AITactics::Cohesion_Ready((int)plan.Members.size(), ready_count, power, ready_power)
+        : March_Ready(plan, house, contacts));
+    if (march_ready) {
         if (plan.Step + 1 >= (int)plan.Route.size()) {
             plan.Phase = STRIKE_ENGAGE;
         } else {
@@ -906,7 +1127,8 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
                     for (int cx = Clamp(px - radius, 0, MAP_CELL_W - 1); cx <= Clamp(px + radius, 0, MAP_CELL_W - 1); ++cx)
                         if (field.Clear[cy * MAP_CELL_W + cx]) ++capacity;
                 }
-                if ((long long)capacity * 100 >= (long long)plan.Members.size() * 80) break;
+                int moving = air_group ? (int)plan.Members.size() : (int)plan.Marchers.size();
+                if ((long long)capacity * 100 >= (long long)moving * 80) break;
             }
             plan.Waypoint = plan.Route[plan.Step];
         }
@@ -914,22 +1136,30 @@ static void Update_Strike(StrikePlan & plan, HouseClass * house, std::vector<Con
         plan.GatheredPower = 0;
     }
     if (plan.Phase != STRIKE_ENGAGE && Frame - plan.ProgressFrame > TICKS_PER_SECOND * 40) {
-        // A blocked or strung-out force never releases a small suicide wave.
-        Cancel(plan, house);
+        Cancel(plan, house, plan.Phase == STRIKE_RALLY ? "rally_timeout" : "advance_timeout", &defenders);
         return;
     }
     // Separate nearby destinations keep a column from queuing on one occupied cell.
-    for (unsigned int i = 0; i < plan.Members.size(); ++i) {
-        FootClass * unit = Member(plan.Members[i], house);
+    std::vector<TARGET> moving;
+    for (unsigned int i = 0; i < plan.Marchers.size(); ++i)
+        if (Contains(plan.Members, plan.Marchers[i])) moving.push_back(plan.Marchers[i]);
+    int leading = (int)moving.size();
+    for (unsigned int i = 0; i < plan.Members.size(); ++i)
+        if (!Contains(moving, plan.Members[i])) moving.push_back(plan.Members[i]);
+    std::map<int, bool> occupied;
+    for (unsigned int i = 0; i < moving.size(); ++i) {
+        FootClass * unit = Member(moving[i], house);
         if (!unit) continue;
         if (plan.Phase == STRIKE_ENGAGE) {
             Attack_Target(unit, plan.Target);
         } else {
-            int x = plan.Waypoint % MAP_CELL_W + (int)(i % formation_width) - formation_width / 2;
-            int y = plan.Waypoint / MAP_CELL_W + (int)(i / formation_width) - formation_width / 2;
+            int index = (int)i < leading ? (int)i : (int)i - leading;
+            int width = (int)i < leading ? Formation_Width(leading) : formation_width;
+            int x = plan.Waypoint % MAP_CELL_W + index % width - width / 2;
+            int y = plan.Waypoint / MAP_CELL_W + index / width - width / 2;
             int slot = Clamp(y, 0, MAP_CELL_H - 1) * MAP_CELL_W + Clamp(x, 0, MAP_CELL_W - 1);
-            slot = field.Approach(slot, 2);
-            if (slot >= 0) Move(unit, slot, true, speed);
+            slot = Formation_Slot(field, slot, formation_width, occupied);
+            if (slot >= 0) Move(unit, slot, true, unit->Techno_Type_Class()->MaxSpeed);
         }
     }
 }
@@ -938,6 +1168,9 @@ struct ThreatRegion {
     Contact const * Enemy;
     int Power;
     int Score;
+    int Count;
+    bool Critical;
+    bool Urgent;
 };
 
 static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighter> const & army,
@@ -957,7 +1190,7 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
         if (i >= Buildings.Count() && ((UnitClass *)asset)->Class->Type != UNIT_HARVESTER
             && ((UnitClass *)asset)->Class->Type != UNIT_MCV) continue;
         int cell = Coord_Cell(asset->Center_Coord());
-        int local = 0;
+        int local = 0, enemy_count = 0;
         Contact const * nearest = NULL;
         int distance = MAP_CELL_W + MAP_CELL_H;
         for (unsigned int j = 0; j < contacts.size(); ++j) {
@@ -966,20 +1199,25 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
             int separation = field.Separation(cell, contact.Cell);
             if (separation <= Clamp(contact.Range + 4, 10, 20)) {
                 local += contact.Power;
+                ++enemy_count;
                 if (separation < distance) { nearest = &contact; distance = separation; }
             }
             int potential = contact.Power * 32 / (separation + 4);
             if (potential > approach_score) { approach_score = potential; approach_cell = contact.Cell; }
         }
         if (local == 0 || !nearest) continue;
-        int score = local;
-        if (state.AttackedFrame >= 0 && Frame - state.AttackedFrame <= TICKS_PER_SECOND * 20
-            && field.Separation(cell, state.AttackedCell) < 4) score += 2000;
-        ThreatRegion region = {nearest, local, score};
+        bool critical = asset->What_Am_I() != RTTI_BUILDING || ((BuildingClass *)asset)->Class->Type != STRUCT_STORAGE;
+        bool urgent = asset->IsUnderAttack || (state.AttackedFrame >= 0 && Frame - state.AttackedFrame <= TICKS_PER_SECOND * 20
+            && field.Separation(cell, state.AttackedCell) < 4);
+        int score = (int)(std::min)((long long)INT_MAX, (long long)local * (critical ? 2 : 1) + (urgent ? 2000 : 0));
+        ThreatRegion region = {nearest, local, score, enemy_count, critical, urgent};
         bool merged = false;
         for (unsigned int j = 0; j < regions.size(); ++j) {
             if (field.Separation(regions[j].Enemy->Cell, nearest->Cell) <= 12) {
+                bool critical_region = regions[j].Critical || region.Critical;
+                bool urgent_region = regions[j].Urgent || region.Urgent;
                 if (score > regions[j].Score) regions[j] = region;
+                regions[j].Critical = critical_region; regions[j].Urgent = urgent_region;
                 merged = true; break;
             }
         }
@@ -1002,7 +1240,10 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
     });
     state.DefenseCell = regions[0].Enemy->Cell;
     state.AirThreat = regions[0].Enemy->Air;
-    if (regions.size() > 3) state.DefenseReady = false;
+    for (unsigned int i = 3; i < regions.size(); ++i) if (regions[i].Critical) state.DefenseReady = false;
+    int ground_count = 0;
+    for (unsigned int i = 0; i < army.size(); ++i) if (!army[i].Air) ++ground_count;
+    int small_raid_budget = (std::max)(1, ground_count / 4);
     // Concurrent raids get separate nearby responders instead of pulling every
     // defender to one front. A unit is committed to at most one region.
     for (unsigned int region = 0; region < regions.size() && region < 3; ++region) {
@@ -1010,6 +1251,15 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
         int enemy_power = regions[region].Power;
         state.ThreatPower += enemy_power;
         state.DefenseTargets.push_back(threat->Object->As_Target());
+        bool small_raid = regions[region].Count <= AITactics::SmallRaidMaximum;
+        int strength = 0, responders = 0;
+        for (int i = 0; i < Buildings.Count(); ++i) {
+            BuildingClass * tower = Buildings.Ptr(i);
+            if (!Alive(tower) || (HouseClass const *)tower->House != house) continue;
+            // Native firing checks include power, ammo and the relevant weapon.
+            if (Battle_Weapon(tower, threat->Object, true)) strength += Power(tower) * 2;
+        }
+        if (AITactics::Raid_Defense_Sufficient(strength, enemy_power, small_raid)) continue;
         std::vector<Fighter> candidates;
         for (unsigned int i = 0; i < army.size(); ++i) {
             Fighter const & fighter = army[i];
@@ -1017,7 +1267,7 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
             if (fighter.Naval && !threat->Naval) continue;
             if (Can_Hit(fighter.Object, *threat)) candidates.push_back(fighter);
         }
-        if (candidates.empty()) { state.DefenseReady = false; continue; }
+        if (candidates.empty()) { if (regions[region].Critical) state.DefenseReady = false; continue; }
         std::stable_sort(candidates.begin(), candidates.end(), [&field, threat](Fighter const & a, Fighter const & b) {
             return field.Separation(a.Cell, threat->Cell) * Clamp((int)b.Object->Techno_Type_Class()->MaxSpeed, 1, 1000)
                 < field.Separation(b.Cell, threat->Cell) * Clamp((int)a.Object->Techno_Type_Class()->MaxSpeed, 1, 1000);
@@ -1036,7 +1286,7 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
             defense_cell = field.Approach(threat->Cell, threat->Air ? 4 : 2);
             if (defense_cell >= 0) break;
         }
-        if (defense_cell < 0) { state.DefenseReady = false; continue; }
+        if (defense_cell < 0) { if (regions[region].Critical) state.DefenseReady = false; continue; }
         field.Search(defense_cell);
         std::stable_sort(candidates.begin(), candidates.end(), [&field](Fighter const & a, Fighter const & b) {
             int ad = field.Distance[a.Cell] < 0 ? MAP_CELL_TOTAL : field.Distance[a.Cell];
@@ -1044,24 +1294,22 @@ static void Defend(TacticalState & state, HouseClass * house, std::vector<Fighte
             return (long long)ad * Clamp((int)b.Object->Techno_Type_Class()->MaxSpeed, 1, 1000)
                 < (long long)bd * Clamp((int)a.Object->Techno_Type_Class()->MaxSpeed, 1, 1000);
         });
-        int strength = 0, responders = 0;
-        for (int i = 0; i < Buildings.Count(); ++i) {
-            BuildingClass * tower = Buildings.Ptr(i);
-            if (!Alive(tower) || (HouseClass const *)tower->House != house) continue;
-            WeaponTypeClass const * weapon = Weapon_Against(tower, threat->Air);
-            if (!weapon) continue;
-            if (field.Separation(Coord_Cell(tower->Center_Coord()), threat->Cell) <= weapon->Range / CELL_LEPTON_W)
-                strength += Power(tower) * 2;
-        }
         for (unsigned int i = 0; i < candidates.size(); ++i) {
             Fighter const & fighter = candidates[i];
             if (field.Distance[fighter.Cell] < 0) continue;
+            if (small_raid && ground_count >= AITactics::OpportunityMinimum && !(regions[region].Critical && regions[region].Urgent)
+                && responders >= small_raid_budget) break;
             defenders.push_back(fighter.Object->As_Target());
             Attack_Target(fighter.Object, threat->Object->As_Target());
             strength += fighter.Power; ++responders;
-            if (responders >= 2 && AITactics::Defense_Sufficient(strength, enemy_power)) break;
+            if (AITactics::Raid_Defense_Sufficient(strength, enemy_power, small_raid)) break;
         }
-        if (!AITactics::Defense_Sufficient(strength, enemy_power)) state.DefenseReady = false;
+        bool sufficient = AITactics::Raid_Defense_Sufficient(strength, enemy_power, small_raid);
+        if (!sufficient && regions[region].Critical) state.DefenseReady = false;
+        AILog::Record(Frame, house->Class->House, "defense_allocation", AILog::Fields().Number("enemy_count", regions[region].Count)
+            .Number("enemy_power", enemy_power).Number("assigned", responders).Number("defense_power", strength)
+            .Number("small_raid_budget", small_raid_budget).Boolean("critical_asset", regions[region].Critical)
+            .Boolean("urgent", regions[region].Urgent).Boolean("sufficient", sufficient));
     }
 }
 
@@ -1081,11 +1329,7 @@ static bool All_Out(TacticalState & state, HouseClass * house, std::vector<Fight
     AILog::Record(Frame, house->Class->House, "all_out_roll", AILog::Fields().Number("tanks", tanks)
         .Number("power", power).Number("roll", roll).Number("chance", AITactics::AllOutChance).Boolean("eligible", ready));
     if (!ready || roll >= AITactics::AllOutChance) return false;
-    int rally = -1;
-    for (unsigned int i = 0; i < state.Ground.Members.size(); ++i) {
-        FootClass * unit = Member(state.Ground.Members[i], house);
-        if (unit && !Contains(defenders, state.Ground.Members[i])) { rally = Coord_Cell(unit->Center_Coord()); break; }
-    }
+    int rally = Strike_Frontline(state.Ground, house, defenders);
     StrikePlan next;
     if (!Start_Strike(next, house, army, contacts, defenders, false, false, false, true, rally,
         tanks > AITactics::EconomyRaidTanks ? STRIKE_ECONOMY : STRIKE_NORMAL)) return false;
@@ -1148,11 +1392,7 @@ static bool Numerical_Assault(TacticalState & state, HouseClass * house, std::ve
             }
             continue;
         }
-        int rally = -1;
-        for (unsigned int i = 0; i < plan.Members.size(); ++i) {
-            FootClass * unit = Member(plan.Members[i], house);
-            if (unit) { rally = Coord_Cell(unit->Center_Coord()); break; }
-        }
+        int rally = Strike_Frontline(plan, house, defenders);
         StrikePlan next;
         if (!Start_Strike(next, house, army, contacts, defenders, naval, air, false, true,
             rally, STRIKE_BASE, true)) continue;
@@ -1198,6 +1438,8 @@ static void Hold_Reserve(HouseClass * house, std::vector<Fighter> const & army, 
         Fighter const & fighter = army[i];
         TARGET target = fighter.Object->As_Target();
         if (LLM_Has_Member(house, target)) continue;
+        if (Frontline_Reserve(state.Ground, target, house) || Frontline_Reserve(state.Fleet, target, house)
+            || Frontline_Reserve(state.Air, target, house)) continue;
         if (Contains(defenders, target) || Contains(state.Ground.Members, target) || Contains(state.Fleet.Members, target) || Contains(state.Air.Members, target)) continue;
         if (fighter.Air) {
             if (state.ThreatPower == 0 && state.Ground.Phase != STRIKE_ENGAGE && state.Fleet.Phase != STRIKE_ENGAGE) Guard(fighter.Object);
@@ -1327,12 +1569,17 @@ bool HouseClass::AI_Update_Tactics(void)
     Update_Strike(state.Air, this, contacts, defenders, scan);
     bool economy = AITactics::Economy_Ready(BQuantity[STRUCT_REFINERY], UQuantity[UNIT_HARVESTER], IsTiberiumShort);
     if (!economy && !numerical) {
-        if (!state.Ground.Fighting) Cancel(state.Ground, this);
-        if (!state.Fleet.Fighting) Cancel(state.Fleet, this);
-        Cancel(state.Air, this);
+        if (!state.Ground.Fighting) Cancel(state.Ground, this, "economy_not_ready", &defenders);
+        if (!state.Fleet.Fighting) Cancel(state.Fleet, this, "economy_not_ready", &defenders);
+        Cancel(state.Air, this, "economy_not_ready", &defenders);
     }
     bool started = !numerical && economy && Frame > TICKS_PER_MINUTE && All_Out(state, this, army, contacts, defenders);
-    if (!numerical && !started && scan && economy && state.DefenseReady && Frame > TICKS_PER_MINUTE && Frame >= state.NextAttack) {
+    bool opportunity = AITactics::Small_Enemy_Opportunity((int)army.size() - (int)defenders.size(), enemy_count);
+    if (scan && opportunity) AILog::Record(Frame, Class->House, "offensive_opportunity", AILog::Fields()
+        .Number("available", (int)army.size() - (int)defenders.size()).Number("enemy_combat_count", enemy_count)
+        .Boolean("defense_ready", state.DefenseReady).Boolean("economy_ready", economy));
+    if (!numerical && !started && scan && economy && state.DefenseReady
+        && (Frame > TICKS_PER_MINUTE || opportunity) && (Frame >= state.NextAttack || opportunity)) {
         if (state.Ground.Phase == STRIKE_HOLD && !LLM_Group_Controlled(this, LLM::GROUND))
             started |= Start_Strike(state.Ground, this, army, contacts, defenders, false, false, false, false, -1,
                 Tank_Count(army) > AITactics::EconomyRaidTanks ? STRIKE_ECONOMY : STRIKE_NORMAL);

@@ -51,6 +51,10 @@ int main(int argc, char ** argv)
             else if (invalid) std::cout << "invalid" << std::endl;
             else std::cout << plan.SnapshotSeq << ':' << plan.Count << ':' << plan.Orders[0].Target
                 << ':' << plan.Orders[0].Generation << std::endl;
+        } else if (command == "publish") {
+            std::string updated;
+            std::getline(std::cin >> std::ws, updated);
+            std::cout << (LLMBridge::Publish(updated) ? "published" : "failed") << std::endl;
         } else return 2;
     }
     LLMBridge::Reset();

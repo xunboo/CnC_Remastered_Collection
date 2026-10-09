@@ -83,6 +83,7 @@ class APIConfig:
     parallel_tool_calls: bool = False
     max_output_tokens: int = 4096
     timeout: float = 60
+    plan_ttl_seconds: int = 30
     interval: float = 8
     headers: dict = field(default_factory=dict, repr=False)
 
@@ -109,6 +110,8 @@ def validate_config(config, require_auth=True):
         raise ConfigError("max_output_tokens must be between 256 and 32768")
     if not 1 <= config.timeout <= 120 or not 1 <= config.interval <= 300:
         raise ConfigError("timeout or interval is outside the supported range")
+    if type(config.plan_ttl_seconds) is not int or not 1 <= config.plan_ttl_seconds <= 30:
+        raise ConfigError("plan_ttl_seconds must be between 1 and 30 simulation seconds")
     for name, value in config.headers.items():
         if (not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
                 or name.lower() in {"authorization", "content-type", "content-length", "host", "connection"}):
@@ -138,8 +141,9 @@ def load_config(path=DEFAULT_CONFIG, require_auth=True, **overrides):
         for name in ("strict", "parallel_tool_calls"):
             if name in settings:
                 settings[name] = configparser.ConfigParser.BOOLEAN_STATES[settings[name].lower()]
-        if "max_output_tokens" in settings:
-            settings["max_output_tokens"] = int(settings["max_output_tokens"])
+        for name in ("max_output_tokens", "plan_ttl_seconds"):
+            if name in settings:
+                settings[name] = int(settings[name])
         for name in ("timeout", "interval"):
             if name in settings:
                 settings[name] = float(settings[name])

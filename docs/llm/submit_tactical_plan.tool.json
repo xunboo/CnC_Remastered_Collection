@@ -9,7 +9,7 @@
       "protocol_version": {
         "type": "integer",
         "enum": [
-          1
+          2
         ]
       },
       "match_id": {
@@ -21,8 +21,11 @@
       "controlled_house_id": {
         "type": "integer"
       },
-      "expires_at_frame": {
-        "type": "integer"
+      "valid_for_ticks": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 450,
+        "description": "Simulation ticks from DLL acceptance, independent of API latency."
       },
       "orders": {
         "type": "array",
@@ -92,10 +95,10 @@
     "required": [
       "based_on_snapshot_seq",
       "controlled_house_id",
-      "expires_at_frame",
       "match_id",
       "orders",
-      "protocol_version"
+      "protocol_version",
+      "valid_for_ticks"
     ],
     "additionalProperties": false
   }

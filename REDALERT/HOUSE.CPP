@@ -6764,7 +6764,7 @@ int HouseClass::AI_Building(void)
 		BuildChoice.Free_All();
 		BuildChoiceClass * choiceptr;
 		StructType stype = STRUCT_NONE;
-		int money = Available_Money();
+		int money = AI_Economic_Cash();
 		int level = Control.TechLevel;
 		bool hasincome = (BQuantity[STRUCT_REFINERY] > 0 && !IsTiberiumShort && UQuantity[UNIT_HARVESTER] > 0);
 		BuildingTypeClass const * b = NULL;
@@ -6792,6 +6792,13 @@ int HouseClass::AI_Building(void)
 				return(TICKS_PER_SECOND);
 			}
 		}
+		// Restore missing military facilities before optional base-size limits.
+		StructType essential = AI_Essential_Building();
+		if (essential != STRUCT_NONE) {
+			BuildStructure = essential;
+			return(TICKS_PER_SECOND);
+		}
+
 		// A threatened approach gets a funded counter before optional expansion.
 		StructType response = AI_Threat_Defense();
 		if (response != STRUCT_NONE) {
@@ -6805,19 +6812,20 @@ int HouseClass::AI_Building(void)
 		// Funded mining and production infrastructure precedes the relative base-size
 		// limit, while still respecting the configured overall and category limits.
 		StructType economic = AI_Economic_Building();
-		if (economic != STRUCT_NONE && (int)CurBuildings < AIMaxBuildings) {
+		if (economic != STRUCT_NONE && (economic != STRUCT_STORAGE || AI_Economic_Storage_Priority())
+			&& (int)CurBuildings < AIMaxBuildings) {
 			BuildStructure = economic;
 			return(TICKS_PER_SECOND);
 		}
 		if (!IsHuman && ((int)CurBuildings >= AIMaxBuildings ||
-			(HumanBuildingCount > 0 && (int)CurBuildings >= max(12, HumanBuildingCount * Rule.AIBuildingsMultiplier)))) {
+			(economic != STRUCT_STORAGE && HumanBuildingCount > 0 && (int)CurBuildings >= max(12, HumanBuildingCount * Rule.AIBuildingsMultiplier)))) {
 			return(TICKS_PER_SECOND);
 		}
 
-		// Keep the moving MCV's refinery and military reserve out of optional spending.
-		if (!IsHuman && Session.Type != GAME_NORMAL && UQuantity[UNIT_MCV] > 0) {
-			money = max(0, AI_Economic_Cash() - AI_Economic_Reserve());
-			hasincome = false;
+		// Reserve reinforcements before optional construction, including requests
+		// selected this tick. Construction and unit production have separate queues.
+		if (!IsHuman && Session.Type != GAME_NORMAL) {
+			money = max(0, AI_Economic_Cash() - AI_Economic_Military_Reserve());
 		}
 
 		//Lets do the build stuff:
@@ -7323,8 +7331,12 @@ int HouseClass::AI_Building(void)
 		**	Pick the choice that is the most urgent.
 		*/
 		UrgencyType best = URGENCY_NONE;
-		int bestindex;
+		int bestindex = 0;
+		int affordable = 0;
+		bool funded = !IsHuman && Session.Type != GAME_NORMAL;
 		for (int index = 0; index < BuildChoice.Count(); index++) {
+			if (funded && BuildingTypeClass::As_Reference(BuildChoice.Ptr(index)->Structure).Cost_Of() > money) continue;
+			++affordable;
 			if (BuildChoice.Ptr(index)->Urgency > best) {
 				bestindex = index;
 				best = BuildChoice.Ptr(index)->Urgency;
@@ -7336,8 +7348,20 @@ int HouseClass::AI_Building(void)
 			}
 			else {
 				// It's URGENCY_MEDIUM or URGENCY_LOW, we pick a random one
-				BuildStructure = BuildChoice.Ptr(Random_Pick(0, BuildChoice.Count() - 1))->Structure;
+				int selected = Random_Pick(0, affordable - 1);
+				for (int index = 0; index < BuildChoice.Count(); ++index) {
+					if (funded && BuildingTypeClass::As_Reference(BuildChoice.Ptr(index)->Structure).Cost_Of() > money) continue;
+					if (selected-- == 0) { BuildStructure = BuildChoice.Ptr(index)->Structure; break; }
+				}
 			}
+		}
+		else if (BuildChoice.Count() == 0 && economic == STRUCT_STORAGE) {
+			// Even an unfunded useful facility precedes storage: accumulate its
+			// budget rather than repeatedly consuming the surplus on cheap silos.
+			bool power_needed = (long long)Power <= (long long)Drain + AIPowerPlus
+				&& (Can_Build(&BuildingTypeClass::As_Reference(STRUCT_ADVANCED_POWER), ActLike)
+					|| Can_Build(&BuildingTypeClass::As_Reference(STRUCT_POWER), ActLike));
+			if (!power_needed) BuildStructure = STRUCT_STORAGE;
 		}
 	}
 	return(TICKS_PER_SECOND);
@@ -7411,9 +7435,10 @@ int HouseClass::AI_Unit(void)
 		}
 	}
 
-	// Make extra harvesters
+	// Restore mining first at low funds. A functioning mine with funded, severely
+	// depleted troops uses the shared War Factory queue for combat recovery first.
 	if (!IsHuman) {
-		if (IQ >= Rule.IQHarvester && !IsTiberiumShort && BQuantity[STRUCT_REFINERY] > 0) {
+		if (IQ >= Rule.IQHarvester && !IsTiberiumShort && BQuantity[STRUCT_REFINERY] > 0 && !AI_Economic_Combat_Priority()) {
 			if ((int)UQuantity[UNIT_HARVESTER] < (int)Rule.AIHarvesterMaxLimit) {
 				if ((int)UQuantity[UNIT_HARVESTER] < (int)(BQuantity[STRUCT_REFINERY] * Rule.AIHarvesterMultiplier) || (int)UQuantity[UNIT_HARVESTER] < 2) {
 					if (Can_Build(&UnitTypeClass::As_Reference(UNIT_HARVESTER), ActLike)) {

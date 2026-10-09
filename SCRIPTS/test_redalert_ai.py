@@ -7,6 +7,7 @@ These checks exercise game decisions without requiring installed game assets.
 """
 from pathlib import Path
 import argparse
+import json
 import os
 import subprocess
 
@@ -71,7 +72,8 @@ def main():
     harvest_methods = []
     for signature in [
         'int UnitClass::Tiberium_Check(', 'bool UnitClass::Goto_Tiberium(',
-        'int UnitClass::Mission_Harvest(', 'BuildingClass* UnitClass::Tiberium_Unload_Refinery(',
+        'bool UnitClass::Harvesting(', 'int UnitClass::Mission_Harvest(',
+        'BuildingClass* UnitClass::Tiberium_Unload_Refinery(',
         'void UnitClass::ReconsiderRefinery('
     ]:
         start = unit_source.index(signature)
@@ -86,9 +88,18 @@ def main():
     end = unit_source.index(' {', condition)
     guard = unit_source[start:condition] + 'return ' + unit_source[condition:end].strip()[3:] + ';\n'
     (output / 'expansion_damage_guard.inc').write_text(guard, encoding='ascii')
+    start = house.index('\t\t// Restore missing military facilities')
+    end = house.index('\n\t\t// A threatened approach', start)
+    essential_priority = house[start:end]
     start = house.index('\t\t// Funded mining and production infrastructure')
-    end = house.index('\n\t\t// Keep the moving MCV', start)
-    (output / 'expansion_building_priority.inc').write_text(house[start:end], encoding='ascii')
+    end = house.index('\n\t\t// Reserve reinforcements before optional construction', start)
+    (output / 'expansion_building_priority.inc').write_text(essential_priority + '\n' + house[start:end], encoding='ascii')
+    start = end
+    end = house.index('\n\t\t//Lets do the build stuff:', start)
+    (output / 'expansion_building_budget.inc').write_text(house[start:end], encoding='ascii')
+    start = house.index('\t\t//All done. Lets pick one to build:', end)
+    end = house.index('\n\t}\n\treturn(TICKS_PER_SECOND);', start)
+    (output / 'expansion_building_selection.inc').write_text(house[start:end], encoding='ascii')
     start = house.index('\t\t//dog house')
     end = house.index('\n\t\t//Soviet barracks', start)
     (output / 'expansion_kennel_choice.inc').write_text(house[start:end], encoding='ascii')
@@ -131,6 +142,29 @@ def main():
             '/Fe' + str(executable), str(root / ('tests/' + test + '.cpp')), str(root / 'REDALERT/AILOG.CPP')
         ], cwd=output, env=environment, check=True)
         subprocess.run([str(executable)], cwd=output, env=environment, check=True, timeout=60)
+        if test == 'tactics_test':
+            logged = subprocess.run(
+                [str(executable), '--strike-log'], cwd=output,
+                env=dict(environment, AIBOOST_LOG='1'), check=True, timeout=60,
+                capture_output=True, text=True, encoding='utf-8'
+            )
+            log_path = Path(json.loads(logged.stdout)['log_path'])
+            records = [json.loads(line) for line in log_path.read_text(encoding='utf-8').splitlines()]
+            cancelled = [row['data'] for row in records if row['event'] == 'strike_cancel']
+            assert {'advance_timeout', 'target_destroyed_or_missing', 'economy_not_ready'} <= {
+                row['reason'] for row in cancelled
+            }, cancelled
+            assert all(isinstance(row.get('reason'), str) and row['reason'] for row in cancelled), cancelled
+            assert all({'live_members', 'power', 'ready_count', 'ready_power', 'batch_members',
+                        'waypoint', 'progress_wait_ticks', 'frontline_cell', 'frontline_preserved'} <= row.keys()
+                       for row in cancelled), cancelled
+            assert any(row['reason'] == 'advance_timeout' and row['frontline_preserved']
+                       and row['frontline_cell'] % 128 >= 60 for row in cancelled), cancelled
+            assert any(row['event'] == 'strike_started' and row['data']['resumed_frontline']
+                       and row['data']['home'] % 128 >= 57 for row in records), records
+            assert any(row['event'] == 'strike_batch_ready' and row['data']['members'] == 40
+                       and row['data']['batch_members'] == 12 for row in records), records
+            print('6 native frontline cancellation log checks passed.', flush=True)
 
 
 if __name__ == '__main__':

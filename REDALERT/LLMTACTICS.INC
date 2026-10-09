@@ -8,6 +8,7 @@ struct LLMMember {
 struct LLMSnapshot {
     int Seq;
     int FrameNumber;
+    unsigned int CapturedAtMillis;
     std::vector<LLMMember> Groups[3];
     std::vector<LLMMember> Targets;
 };
@@ -118,6 +119,7 @@ static void LLM_Publish(HouseClass * house, std::vector<Fighter> const & army,
     state.NextSnapshot = Frame + TICKS_PER_SECOND;
     LLMSnapshot snapshot;
     snapshot.Seq = ++LLMSnapshotSeq; snapshot.FrameNumber = Frame;
+    snapshot.CapturedAtMillis = LLMBridge::Milliseconds();
     FootClass const * representatives[3] = {};
     int priority[3] = {-1, -1, -1};
     for (unsigned int i = 0; i < army.size(); ++i) {
@@ -132,7 +134,7 @@ static void LLM_Publish(HouseClass * house, std::vector<Fighter> const & army,
     for (int group = 0; group < 3; ++group)
         if (representatives[group]) Fill_Routes(fields[group], representatives[group], Coord_Cell(representatives[group]->Center_Coord()));
     std::ostringstream json;
-    json << "{\"protocol_version\":1,\"match_id\":\"" << std::hex << std::setw(8) << std::setfill('0')
+    json << "{\"protocol_version\":" << LLM::ProtocolVersion << ",\"match_id\":\"" << std::hex << std::setw(8) << std::setfill('0')
         << LLMMatchHigh << std::setw(8) << LLMMatchLow << std::dec << "\",\"snapshot_seq\":" << snapshot.Seq
         << ",\"sim_frame\":" << Frame << ",\"controlled_house_id\":" << (int)house->Class->House
         << ",\"visibility_mode\":\"omniscient\",\"ticks_per_second\":" << TICKS_PER_SECOND
@@ -237,7 +239,11 @@ static void LLM_Publish(HouseClass * house, std::vector<Fighter> const & army,
     if (LLMBridge::Publish(json.str())) {
         AILog::Record(Frame, house->Class->House, "llm_snapshot", json.str());
         state.History.push_back(snapshot);
-        if (state.History.size() > 32) state.History.pop_front();
+        // A slow response must retain its membership/target generations even
+        // when accelerated simulation publishes more than 32 newer snapshots.
+        while (!state.History.empty() && (state.History.size() > LLM::MaxSnapshotHistory
+            || snapshot.CapturedAtMillis - state.History.front().CapturedAtMillis > LLM::MaxSnapshotAgeMillis))
+            state.History.pop_front();
     }
 }
 
@@ -263,7 +269,7 @@ static void LLM_Release(HouseClass * house, TacticalState & tactical, int group,
         // Native plans use slot handles. Never let their cancellation touch a
         // replacement object that was not part of this external directive.
         LLM_Prune(strike, directive);
-        Cancel(strike, house, &tactical.Defenders);
+        Cancel(strike, house, status, &tactical.Defenders);
     } else if (!LLM::Target_Action(directive.Order.ActionID)) {
         for (unsigned int i = 0; i < directive.Members.size(); ++i) {
             LLMMember const & member = directive.Members[i];
@@ -284,10 +290,10 @@ static bool LLM_Apply(HouseClass * house, TacticalState & tactical, std::vector<
     for (unsigned int i = 0; i < state.History.size(); ++i)
         if (state.History[i].Seq == plan.SnapshotSeq) { snapshot = &state.History[i]; break; }
     if (!snapshot || !LLM::Fresh(plan, LLMMatchLow, LLMMatchHigh, house->Class->House,
-        Frame, snapshot->FrameNumber, state.LastApplied)) {
+        Frame, snapshot->FrameNumber, state.LastApplied, LLMBridge::Milliseconds() - snapshot->CapturedAtMillis)) {
         AILog::Record(Frame, house->Class->House, "llm_plan_rejected", AILog::Fields().Number("snapshot_seq", plan.SnapshotSeq)
-            .Number("expires_at_frame", plan.ExpiresAt).Number("last_applied", state.LastApplied)
-            .Text("reason", snapshot ? "envelope_or_ttl" : "snapshot_not_in_history"));
+            .Number("valid_for_ticks", plan.ValidForTicks).Number("last_applied", state.LastApplied)
+            .Text("reason", snapshot ? "envelope_or_response_age" : "snapshot_not_in_history"));
         return false;
     }
     // Prepare every order before mutating any unit. A bad order rejects the whole plan.
@@ -309,7 +315,7 @@ static bool LLM_Apply(HouseClass * house, TacticalState & tactical, std::vector<
         }
         if (available.empty()) return false;
         LLMDirective & directive = directives[group];
-        directive.Active = true; directive.ExpiresAt = plan.ExpiresAt; directive.Order = order; directive.SnapshotSeq = plan.SnapshotSeq;
+        directive.Active = true; directive.ExpiresAt = Frame + plan.ValidForTicks; directive.Order = order; directive.SnapshotSeq = plan.SnapshotSeq;
         directive.RetreatCell = group == LLM::NAVAL || !house->Center ? available[0].Cell : Coord_Cell(house->Center);
         if (LLM::Target_Action(order.ActionID)) {
             bool known = false;
@@ -357,9 +363,15 @@ static bool LLM_Apply(HouseClass * house, TacticalState & tactical, std::vector<
         StrikePlan & strike = LLM_Strike(tactical, group);
         if (state.Directives[group].Active) LLM_Release(house, tactical, group, "superseded");
         if (directives[group].Active) {
-            if (strike.Phase != STRIKE_HOLD) Cancel(strike, house, &tactical.Defenders);
+            if (strike.Phase != STRIKE_HOLD) Cancel(strike, house, "model_takeover", &tactical.Defenders);
             state.Directives[group] = directives[group];
-            if (prepared[group].External) strike = prepared[group];
+            if (prepared[group].External) {
+                // Preparation precedes cancellation; retain the survivors that
+                // cancellation has just placed on frontline guard duty.
+                prepared[group].FrontlineReserve = strike.FrontlineReserve;
+                if (strike.FrontlineCell >= 0) prepared[group].FrontlineCell = strike.FrontlineCell;
+                strike = prepared[group];
+            }
             LLM_Result(state, plan.SnapshotSeq, group, "accepted");
         }
     }
@@ -373,7 +385,9 @@ static bool LLM_Apply(HouseClass * house, TacticalState & tactical, std::vector<
             .Number("commit_percent", order.CommitPercent).Number("withdraw_percent", order.WithdrawPercent).Json();
     }
     AILog::Record(Frame, house->Class->House, "llm_plan_applied", AILog::Fields().Number("snapshot_seq", plan.SnapshotSeq)
-        .Number("expires_at_frame", plan.ExpiresAt).Raw("orders", orders + ']'));
+        .Number("applied_at_frame", Frame).Number("valid_for_ticks", plan.ValidForTicks)
+        .Number("expires_at_frame", Frame + plan.ValidForTicks)
+        .Number("snapshot_age_millis", LLMBridge::Milliseconds() - snapshot->CapturedAtMillis).Raw("orders", orders + ']'));
     if (!plan.Count) LLM_Result(state, plan.SnapshotSeq, -1, "native_control_restored");
     return true;
 }
@@ -429,7 +443,7 @@ static void LLM_Tick(HouseClass * house, TacticalState & tactical, std::vector<F
         if (order.ActionID != LLM::HOLD && order.ActionID != LLM::RETREAT_TO
             && hp / (int)members.size() < order.WithdrawPercent) {
             int cell = directive.RetreatCell;
-            if (strike.External) Cancel(strike, house, &tactical.Defenders);
+            if (strike.External) Cancel(strike, house, "withdrawing_low_health", &tactical.Defenders);
             order.ActionID = LLM::RETREAT_TO;
             order.X = cell % MAP_CELL_W; order.Y = cell / MAP_CELL_W;
             LLM_Result(state, directive.SnapshotSeq, group, "withdrawing_low_health");

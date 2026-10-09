@@ -106,6 +106,8 @@ public:
             ? BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of()+BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of() : 0));
     }
     bool EconomyExpansionReady=false;
+    bool CombatPriority=false;
+    bool AI_Economic_Combat_Priority() const { return CombatPriority && !IsHuman && Session.Type != GAME_NORMAL; }
     int EconomicBaseLimit=-1;
     bool AI_Economic_MCV_Ready() { return EconomyExpansionReady; }
     bool AllowExtraBaseAtWaypoint, IncreaseLimitDone, IsAlerted, AIDetectedNavalWar, AIDetectHumanGroundWar, NavalAccess;
@@ -179,6 +181,17 @@ static void types_reset()
 int main()
 {
     types_reset();
+    {
+        for(int i=0;i<UNIT_COUNT;++i) UnitTypeClass::Types[i].Allowed=i==UNIT_MTANK || i==UNIT_HARVESTER;
+        HouseClass h; h.BQuantity[STRUCT_REFINERY]=1; h.UQuantity[UNIT_HARVESTER]=1; h.CurUnits=1;
+        h.CombatPriority=true; h.AI_Unit();
+        check(h.BuildUnit==UNIT_MTANK,"funded combat recovery uses the War Factory before optional extra harvesters");
+        h.BuildUnit=UNIT_NONE; h.CombatPriority=false; h.Money=1400; h.AI_Unit();
+        check(h.BuildUnit==UNIT_HARVESTER,"an economic recovery decision retains the harvester-first native queue");
+        h.BuildUnit=UNIT_NONE; h.AIMaxTanksNr=0; h.AI_Unit();
+        check(h.BuildUnit==UNIT_HARVESTER,"a disabled ground army can continue restoring harvesters");
+        types_reset();
+    }
     {
         HouseClass h; h.BQuantity[STRUCT_REPAIR]=1; h.BQuantity[STRUCT_REFINERY]=2;
         h.UQuantity[UNIT_HARVESTER]=4; h.CurUnits=8; h.EconomyExpansionReady=true;

@@ -4,6 +4,9 @@
 [Dd]ebug/
 [Rr]elease/
 [Bb]in/
+!/bin/
+/bin/*
+!/bin/Win32/
 [Bb]uild/
 *.obj
 *.pdb
@@ -11,6 +14,9 @@
 *.ilk
 *.idb
 *.tlog
+
+# Published Win32 binaries, linker files and matching debug symbols
+!/bin/Win32/**
 
 # Local review material and changelog folder (excluded from publication)
 /[Rr]eview/

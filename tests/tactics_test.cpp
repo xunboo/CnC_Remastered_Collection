@@ -10,6 +10,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace BridgeFixture {
@@ -18,16 +19,19 @@ LLM::Identities Identities;
 std::string Snapshot;
 std::vector<unsigned char> Pending;
 unsigned int Epoch=0;
+unsigned int ClockMillis=0;
 }
 void LLMBridge::Set_Local_Game(bool allowed) { BridgeFixture::Local=allowed; }
 bool LLMBridge::Can_Control(int house) { return BridgeFixture::Enabled && BridgeFixture::Local && house==0; }
 void LLMBridge::Reset() {
     BridgeFixture::Enabled=false; BridgeFixture::Local=false;
     BridgeFixture::Identities.Clear(); BridgeFixture::Snapshot.clear(); BridgeFixture::Pending.clear();
+    BridgeFixture::ClockMillis=0;
 }
 void LLMBridge::New_Match(unsigned int & low,unsigned int & high) { low=++BridgeFixture::Epoch; high=1; }
 void LLMBridge::Object_Created(unsigned int target) { BridgeFixture::Identities.Created(target); }
 unsigned int LLMBridge::Object_Generation(unsigned int target) { return BridgeFixture::Identities.Generation(target); }
+unsigned int LLMBridge::Milliseconds() { return BridgeFixture::ClockMillis; }
 bool LLMBridge::Publish(std::string const & snapshot) { BridgeFixture::Snapshot=snapshot; return true; }
 bool LLMBridge::Receive(LLM::Plan & plan,bool & invalid) {
     invalid=false; if(BridgeFixture::Pending.empty()) return false;
@@ -55,7 +59,7 @@ const int RTTI_UNIT=1, RTTI_INFANTRY=2, RTTI_VESSEL=3, RTTI_AIRCRAFT=4, RTTI_BUI
 const int UNIT_HTANK=0, UNIT_HARVESTER=1, UNIT_MCV=2, UNIT_MINELAYER=3, UNIT_MAD=4, UNIT_DEMOTRUCK=5;
 const int UNIT_MTANK=6, UNIT_MTANK2=7, UNIT_LTANK=8, UNIT_CHRONOTANK=9, UNIT_TESLATANK=10;
 const int STRUCT_CONST=0, STRUCT_REFINERY=1, STRUCT_WEAP=2, STRUCT_POWER=3, STRUCT_ADVANCED_POWER=4;
-const int STRUCT_TESLA=5, STRUCT_TURRET=6, STRUCT_FLAME_TURRET=7, STRUCT_PILLBOX=8, STRUCT_SAM=9, STRUCT_AAGUN=10, STRUCT_NONE=-1;
+const int STRUCT_TESLA=5, STRUCT_TURRET=6, STRUCT_FLAME_TURRET=7, STRUCT_PILLBOX=8, STRUCT_SAM=9, STRUCT_AAGUN=10, STRUCT_STORAGE=11, STRUCT_NONE=-1;
 const int MISSION_GUARD=0, MISSION_MOVE=1, MISSION_ATTACK=2, MISSION_HUNT=3, MISSION_ENTER=4;
 const int MISSION_RETREAT=5, MISSION_CAPTURE=6, MISSION_UNLOAD=7;
 const int MPH_IMMOBILE=0, MPH_LIGHT_SPEED=1000, OVERLAY_NONE=-1, SPEED_FLOAT=1, SPEED_WINGED=2;
@@ -102,15 +106,15 @@ struct TechnoTypeClass {
     bool Legal_Placement(CELL cell) const;
 };
 struct BuildingTypeClass : TechnoTypeClass {
-    static BuildingTypeClass Types[11];
+    static BuildingTypeClass Types[12];
     static BuildingTypeClass const & As_Reference(StructType type) { return Types[type]; }
 };
-BuildingTypeClass BuildingTypeClass::Types[11];
+BuildingTypeClass BuildingTypeClass::Types[12];
 std::map<TARGET,struct TechnoClass *> Targets;
 struct TechnoClass {
     HouseClass * House=nullptr;
     TechnoTypeClass const * Class=nullptr;
-    bool IsActive=true, IsInLimbo=false, AttackMove=false, IsTethered=false;
+    bool IsActive=true, IsInLimbo=false, AttackMove=false, IsTethered=false, IsUnderAttack=false;
     int Strength=500, Kind=RTTI_UNIT, Mission=MISSION_GUARD, FireStatus=FIRE_OK, Ammo=5;
     bool Hidden=false;
     COORDINATE Coord=0;
@@ -224,7 +228,7 @@ struct World {
         Infantry.Data.clear(); Vessels.Data.clear(); Aircraft.Data.clear();
         AI.BQuantity[STRUCT_REFINERY]=1; AI.UQuantity[UNIT_HARVESTER]=1;
         AirBullet.IsAntiAircraft=true; AntiAir.Bullet=&AirBullet;
-        for (int i=0;i<11;++i) { BuildingTypeClass::Types[i]=BuildingTypeClass(); BuildingTypeClass::Types[i].Type=i; }
+        for (int i=0;i<12;++i) { BuildingTypeClass::Types[i]=BuildingTypeClass(); BuildingTypeClass::Types[i].Type=i; }
     }
     template<class T> T * Add(HouseClass & house,int x,int y,int kind,int type,int cost=1000,bool armed=true)
     {
@@ -268,15 +272,35 @@ static LLM::Plan ModelPlan(World & world)
     BridgeFixture::Enabled=true; LLMBridge::Set_Local_Game(true);
     world.AI.AI_Update_Tactics();
     LLMSnapshot const & snapshot=LLMStates[0].History.back();
-    LLM::Plan plan={}; plan.Magic=LLM::PlanMagic; plan.Version=1;
+    LLM::Plan plan={}; plan.Magic=LLM::PlanMagic; plan.Version=LLM::ProtocolVersion;
     plan.MatchLow=LLMMatchLow; plan.MatchHigh=LLMMatchHigh; plan.House=0;
-    plan.SnapshotSeq=snapshot.Seq; plan.ExpiresAt=snapshot.FrameNumber+LLM::MaxPlanTicks;
+    plan.SnapshotSeq=snapshot.Seq; plan.ValidForTicks=LLM::MaxPlanTicks;
     return plan;
 }
 static void ModelOrder(LLM::Plan & plan,int group,int action,TechnoClass * target=nullptr,int x=-1,int y=-1,int commit=75)
 {
     LLM::Order order={group,action,target?target->As_Target():0,target?LLMBridge::Object_Generation(target->As_Target()):0,x,y,commit,35};
     plan.Orders[plan.Count++]=order;
+}
+
+static StrikePlan & FrontWave(World & world,int arrived,bool forced=true,TechnoClass * target=nullptr)
+{
+    world.Army(40);
+    for(int i=0;i<arrived;++i) Units.Ptr(i)->Coord=Cell_Coord(Cell(60+i%3,43+i/3%3));
+    if(!target) target=world.Building(world.Enemy,90,43,STRUCT_REFINERY);
+    TacticalState & state=Tactical_State(&world.AI);
+    std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+    Gather(&world.AI,army,contacts);
+    check(Start_Strike(state.Ground,&world.AI,army,contacts,defenders,false,false,false,true,
+        Cell(61,44),STRIKE_BASE,forced,target->As_Target()),"frontline regression wave has a valid target and route");
+    return state.Ground;
+}
+
+static void FrontUpdate(World & world,bool scan=false)
+{
+    std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+    Gather(&world.AI,army,contacts);
+    Update_Strike(TacticalStates[0].Ground,&world.AI,contacts,defenders,scan);
 }
 static void Deliver(World & world,LLM::Plan const & plan)
 {
@@ -287,6 +311,30 @@ static void Deliver(World & world,LLM::Plan const & plan)
 
 int main(int argc,char ** argv)
 {
+    if(argc>1 && std::string(argv[1])=="--strike-log") {
+        World w; StrikePlan & plan=FrontWave(w,12);
+        AILog::Begin(Frame,AILog::Fields().Text("fixture","frontline_cancel"));
+        check(AILog::Enabled(),"native cancellation logging is enabled in the log fixture");
+        FrontUpdate(w);
+        for(auto target:plan.Marchers) Member(target,&w.AI)->Coord=Cell_Coord(Cell(60,43));
+        plan.Waypoint=Cell(67,43); plan.GatheredPower=1000000;
+        plan.ProgressFrame=Frame-41*TICKS_PER_SECOND;
+        FrontUpdate(w);
+        check(plan.Phase==STRIKE_HOLD,"actual stalled advance reaches the cancellation logger");
+        w.Tick(false,3);
+        check(plan.Forced && plan.Home%MAP_CELL_W>=57,"logged numerical restart uses the retained frontline");
+        As_Techno(plan.Target)->Strength=0; FrontUpdate(w);
+        check(plan.Phase==STRIKE_HOLD,"a destroyed final target reaches the cancellation logger");
+        for(int i=0;i<40;++i) w.Tank(w.Enemy,110+i%5,110+i/5);
+        w.Building(w.Enemy,90,80,STRUCT_REFINERY);
+        w.Tick(false,6);
+        check(plan.Phase!=STRIKE_HOLD,"the ordinary wave restarts after numerical superiority ends");
+        w.AI.UQuantity[UNIT_HARVESTER]=0; w.Tick();
+        check(plan.Phase==STRIKE_HOLD,"lost income reaches the cancellation logger");
+        std::string path=AILog::Path(); AILog::End(Frame,"fixture_complete");
+        std::cout<<AILog::Fields().Text("log_path",path.c_str()).Json()<<std::endl;
+        return 0;
+    }
     if ((argc==2 || argc==3) && std::string(argv[1])=="--llm-pipe") {
         std::string action=argc==3 ? argv[2] : "attack_target";
         if (action!="hold" && action!="attack_target" && action!="defend_area") return 2;
@@ -327,7 +375,7 @@ int main(int argc,char ** argv)
         w.Tick(false,3);
         check(TacticalStates[0].Ground.Phase==STRIKE_HOLD,
             "native all-out and numerical policies cannot overwrite a model hold");
-        Frame=plan.ExpiresAt; w.AI.AI_Update_Tactics();
+        Frame=LLMStates[0].Directives[LLM::GROUND].ExpiresAt; w.AI.AI_Update_Tactics();
         check(!LLM_Group_Controlled(&w.AI,LLM::GROUND) && TacticalStates[0].Ground.Forced,
             "expired model control restores the native numerical assault");
     }
@@ -352,6 +400,81 @@ int main(int argc,char ** argv)
         LLMBridge::Object_Created(target->As_Target()); Deliver(w,plan);
         check(LLMStates[0].LastApplied==0 && !LLM_Group_Controlled(&w.AI,0),
             "slot reuse invalidates a target captured before construction of its new instance");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target);
+        for(int i=1;i<=70;++i) { BridgeFixture::ClockMillis=i*700; w.Tick(); }
+        BridgeFixture::ClockMillis=52000;
+        check(Frame>LLMStates[0].History.front().FrameNumber+LLM::MaxPlanTicks
+            && LLMStates[0].History.size()>32,
+            "accelerated simulation retains request identities throughout a slow network reply");
+        Deliver(w,plan);
+        check(LLMStates[0].LastApplied==plan.SnapshotSeq && TacticalStates[0].Ground.External,
+            "a fifty-two-second reply can be accepted after the old snapshot-based TTL would expire");
+        int expires=LLMStates[0].Directives[0].ExpiresAt;
+        check(expires==Frame+plan.ValidForTicks,"execution TTL starts at DLL acceptance");
+        Deliver(w,plan);
+        check(LLMStates[0].Directives[0].ExpiresAt==expires,"replaying the same snapshot cannot extend execution TTL");
+        Frame=expires-1; w.AI.AI_Update_Tactics();
+        check(LLM_Group_Controlled(&w.AI,0),"a delayed plan retains its full accepted execution duration");
+        Frame=expires; w.AI.AI_Update_Tactics();
+        check(!LLM_Group_Controlled(&w.AI,0),"execution still expires at its independent simulation deadline");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target);
+        Frame+=1000; BridgeFixture::ClockMillis=52000; target->IsInLimbo=true; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"a delayed reply cannot attack a target that died during the request");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target);
+        Frame+=1000; BridgeFixture::ClockMillis=52000;
+        LLMBridge::Object_Created(target->As_Target()); Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"target generation remains mandatory after a delayed reply");
+    }
+    {
+        World w; w.Army(8);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::DEFEND_AREA,nullptr,80,43);
+        Frame+=1000; BridgeFixture::ClockMillis=52000;
+        for(int y=0;y<128;++y) Map[Cell(50,y)].Clear=false;
+        Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"a delayed area reply rechecks paths blocked after capture");
+    }
+    {
+        World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER,800);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target);
+        Frame+=1000; BridgeFixture::ClockMillis=52000;
+        w.Building(w.Enemy,78,43,STRUCT_TESLA,20000,true); Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"a delayed attack rechecks newly fortified enemy strength");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        for(auto unit:Units.Data) LLMBridge::Object_Created(unit->As_Target());
+        Frame+=1000; BridgeFixture::ClockMillis=52000; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"delayed plans cannot recruit replacement friendly instances");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        BridgeFixture::ClockMillis=LLM::MaxSnapshotAgeMillis+1; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"the independent native wall-time response ceiling still rejects ancient replies");
+    }
+    {
+        World w; w.Army(8); BridgeFixture::ClockMillis=0xfffffff0u;
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        BridgeFixture::ClockMillis=100; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==plan.SnapshotSeq,"wall-time freshness handles the Windows tick counter wrapping");
+    }
+    for(int lifetime:{0,LLM::MaxPlanTicks+1}) {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        plan.ValidForTicks=lifetime; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"invalid execution duration is rejected by native wire validation");
+    }
+    {
+        World w; w.Army(8); auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::HOLD);
+        plan.Version=1; Deliver(w,plan);
+        check(LLMStates[0].LastApplied==0,"old absolute-expiry packets cannot be interpreted as relative-duration plans");
     }
     {
         World w; w.Army(8); auto target=w.Building(w.Enemy,80,43,STRUCT_POWER);
@@ -1265,6 +1388,195 @@ int main(int argc,char ** argv)
             "numerical and harassment policies do not commandeer a human army");
         w.AI.IsHuman=false; Session.Type=GAME_NORMAL; w.AI.AI_Update_Tactics();
         check(TacticalStates[0].Ground.Phase==STRIKE_HOLD,"campaign control retains its existing behavior");
+    }
+    check(Small_Enemy_Opportunity(8,0) && Small_Enemy_Opportunity(12,6),"small enemy opportunities cover zero through six combat units");
+    check(!Small_Enemy_Opportunity(7,0) && !Small_Enemy_Opportunity(11,6) && !Small_Enemy_Opportunity(40,7),
+        "small enemy opportunities require a ready force, two-to-one numbers and at most six enemies");
+    {
+        World w; w.Army(8); Frame=20*TICKS_PER_SECOND; auto target=w.Building(w.Enemy,80,43,STRUCT_REFINERY);
+        TacticalStates[0].NextAttack=Frame+1000; w.AI.AI_Update_Tactics();
+        check(TacticalStates[0].Ground.Phase!=STRIKE_HOLD && TacticalStates[0].Ground.Target==target->As_Target(),
+            "a weak enemy triggers a safe proactive attack before one minute and before the normal attack timer");
+    }
+    {
+        World w; w.Army(8); Frame=20*TICKS_PER_SECOND; w.Building(w.Enemy,80,43,STRUCT_REFINERY);
+        for(int i=0;i<6;++i) w.Tank(w.Enemy,110+i,110);
+        w.AI.AI_Update_Tactics();
+        check(TacticalStates[0].Ground.Phase==STRIKE_HOLD,"early opportunistic attacks still require two-to-one available numbers");
+    }
+    {
+        World w; w.Army(12); auto raider=w.Tank(w.Enemy,22,44);
+        w.Building(w.AI,21,43,STRUCT_TURRET,2000,true);
+        std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+        Gather(&w.AI,army,contacts); Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(defenders.empty() && TacticalStates[0].DefenseReady,"working fixed defenses can cover a small raid without mandatory mobile defenders");
+        check(raider->Strength>0,"fixed-defense allocation only plans responses and does not alter combat outcomes");
+    }
+    {
+        World w; w.Building(w.AI,19,43,STRUCT_REFINERY); auto tower=w.Building(w.AI,21,43,STRUCT_TURRET,2000,true);
+        w.Tank(w.Enemy,23,43);
+        std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+        Gather(&w.AI,army,contacts); Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(TacticalStates[0].DefenseReady && defenders.empty(),"adequate towers count as ready defense even with no mobile candidates");
+        tower->Ammo=0; Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(!TacticalStates[0].DefenseReady,"a tower that cannot fire does not falsely cover an undefended critical asset");
+    }
+    {
+        World w; w.Army(12); auto raider=w.Tank(w.Enemy,28,43);
+        const_cast<TechnoTypeClass *>(raider->Class)->Cost=300;
+        std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+        Gather(&w.AI,army,contacts); Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(defenders.size()==1 && TacticalStates[0].DefenseReady,"one sufficient nearby responder replaces the mandatory two-unit small-raid response");
+    }
+    {
+        World w; w.Army(16);
+        for(int i=0;i<3;++i) { auto raider=w.Tank(w.Enemy,28+i,43); const_cast<TechnoTypeClass *>(raider->Class)->Cost=10000; }
+        std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+        Gather(&w.AI,army,contacts); Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(defenders.size()==4 && !TacticalStates[0].DefenseReady,"a non-urgent small raid cannot absorb more than a quarter of the available ground army");
+        Buildings.Data[0]->IsUnderAttack=true; defenders.clear();
+        Defend(TacticalStates[0],&w.AI,army,contacts,defenders);
+        check(defenders.size()>4,"direct damage to critical infrastructure permits emergency reinforcement beyond the small-raid budget");
+    }
+    {
+        World w; w.Army(12); Frame=20*TICKS_PER_SECOND;
+        auto target=w.Building(w.Enemy,80,43,STRUCT_REFINERY); w.Building(w.AI,30,80,STRUCT_STORAGE);
+        auto raid=w.Tank(w.Enemy,39,80); const_cast<TechnoTypeClass *>(raid->Class)->Cost=10000;
+        w.AI.AI_Update_Tactics();
+        check(TacticalStates[0].Defenders.size()<=3 && TacticalStates[0].DefenseReady,
+            "a raid on optional storage has a bounded response and cannot veto the whole offensive");
+        check(TacticalStates[0].Ground.Phase!=STRIKE_HOLD && TacticalStates[0].Ground.Target==target->As_Target(),
+            "spare forces exploit a weak enemy while a limited detachment covers optional storage");
+    }
+    {
+        World w; w.Army(8); Frame=20*TICKS_PER_SECOND; w.Building(w.Enemy,80,43,STRUCT_REFINERY);
+        for(int i=0;i<3;++i) { auto raid=w.Tank(w.Enemy,27+i,43); const_cast<TechnoTypeClass *>(raid->Class)->Cost=10000; }
+        w.AI.AI_Update_Tactics();
+        check(!TacticalStates[0].DefenseReady && TacticalStates[0].Ground.Phase==STRIKE_HOLD,
+            "few powerful enemies threatening uncovered essential infrastructure still prevent an unsafe opportunity attack");
+    }
+    {
+        World w; w.Army(8); Frame=20*TICKS_PER_SECOND; w.Building(w.Enemy,80,43,STRUCT_REFINERY);
+        w.Building(w.Enemy,79,43,STRUCT_TURRET,10000,true); w.AI.AI_Update_Tactics();
+        check(TacticalStates[0].Ground.Phase==STRIKE_HOLD,"few enemy mobile units never bypass fortified-target or route safety checks");
+    }
+    check(March_Batch_Ready(60,12,12000),"an arrived combat batch need not wait for a sixty-unit army");
+    check(!March_Batch_Ready(60,1,10000) && !March_Batch_Ready(60,4,1999),
+        "one expensive scout or a weak group cannot lead a large army");
+    check(March_Batch_Ready(2,2,1000) && !March_Batch_Ready(2,1,1000),
+        "a forced remnant moves only when its remaining members arrive");
+    {
+        World w; StrikePlan & plan=FrontWave(w,12);
+        const_cast<TechnoTypeClass *>(Units.Data.back()->Class)->MaxSpeed=1;
+        FrontUpdate(w);
+        check(plan.Phase==STRIKE_ADVANCE && plan.Marchers.size()==12,
+            "twelve frontline tanks advance while twenty-eight members remain behind");
+        check(Units.Ptr(0)->FormationMaxSpeed==Units.Ptr(0)->Class->MaxSpeed && Units.Data.back()->FormationMaxSpeed==1,
+            "a slow straggler does not reduce the marching speed of faster tanks");
+        std::set<TARGET> destinations;
+        for(auto unit:Units.Data) destinations.insert(unit->NavCom);
+        check(destinations.size()==plan.Members.size(),"the leading batch and trailing formations use distinct open-ground destinations");
+        int previous=plan.Waypoint;
+        for(auto target:plan.Marchers) Member(target,&w.AI)->Coord=Cell_Coord((CELL)previous);
+        for(int i=0;i<20;++i) w.Tank(w.AI,21+i%5,40+i/5);
+        w.Tick(false,3);
+        check(plan.Members.size()==60 && plan.Waypoint%MAP_CELL_W>previous%MAP_CELL_W,
+            "twenty new rear reinforcements join without blocking the arrived batch");
+        check(plan.Marchers.size()==12,"new recruits do not enlarge the current cohesion denominator");
+        previous=plan.Waypoint;
+        auto old_batch=plan.Marchers;
+        for(auto target:old_batch) Member(target,&w.AI)->Coord=Cell_Coord(Cell(20,40));
+        for(int i=12;i<24;++i) Units.Ptr(i)->Coord=Cell_Coord((CELL)previous);
+        FrontUpdate(w);
+        check(plan.Waypoint%MAP_CELL_W>previous%MAP_CELL_W && plan.Marchers!=old_batch,
+            "another arrived batch can advance instead of waiting for the previous batch's stragglers");
+    }
+    {
+        World w; StrikePlan & plan=FrontWave(w,1); FrontUpdate(w);
+        check(plan.Phase==STRIKE_RALLY && plan.Marchers.empty(),"one frontline tank cannot pull a scattered forty-tank wave into combat");
+    }
+    {
+        World w; StrikePlan & plan=FrontWave(w,4);
+        for(int i=0;i<4;++i) const_cast<TechnoTypeClass *>(Units.Ptr(i)->Class)->Cost=100;
+        FrontUpdate(w);
+        check(plan.Phase==STRIKE_RALLY,"four cheap scouts still wait for a batch with useful combat power");
+    }
+    {
+        World w; auto target=w.Building(w.Enemy,90,43,STRUCT_REFINERY);
+        w.Building(w.Enemy,88,43,STRUCT_TURRET,3000,true);
+        StrikePlan & plan=FrontWave(w,4,false,target); FrontUpdate(w);
+        check(plan.Phase==STRIKE_RALLY,"ordinary batches retain the target's local defense strength requirement");
+        for(int i=0;i<14;++i) Units.Ptr(i)->Coord=Cell_Coord(Cell(61,44));
+        FrontUpdate(w);
+        check(plan.Phase==STRIKE_ADVANCE && plan.Marchers.size()==12,
+            "a sufficient arrived batch can pass local safety without waiting for the whole army");
+    }
+    {
+        World w; StrikePlan & plan=FrontWave(w,12); FrontUpdate(w);
+        auto members=plan.Members;
+        auto batch=plan.Marchers;
+        auto protected_unit=Member(members[0],&w.AI);
+        std::vector<TARGET> protected_units(1,protected_unit->As_Target());
+        Move(protected_unit,Cell(25,43));
+        std::string diagnostic=Cancel_Fields(plan,&w.AI,"advance_timeout",Cell(61,44)).Json();
+        check(diagnostic.find("\"reason\":\"advance_timeout\"")!=std::string::npos
+            && diagnostic.find("\"ready_power\":")!=std::string::npos
+            && diagnostic.find("\"progress_wait_ticks\":")!=std::string::npos,
+            "cancellation diagnostics contain the reason, gathered power and waiting time");
+        Cancel(plan,&w.AI,"advance_timeout",&protected_units);
+        check(plan.Phase==STRIKE_HOLD && plan.FrontlineCell%MAP_CELL_W>=60 && !plan.FrontlineReserve.empty(),
+            "cancellation retains the living frontline batch and its position");
+        check(protected_unit->Mission==MISSION_MOVE && protected_unit->NavCom==As_Target(Cell(25,43))
+            && !Frontline_Reserve(plan,protected_unit->As_Target(),&w.AI),"cancellation preserves assigned defenders' orders");
+        TacticalStates[0].NextForcedAttempt=Frame+100*TICKS_PER_SECOND;
+        TacticalStates[0].NumericalAssault=true;
+        w.Tick(false,2);
+        bool held=true;
+        for(auto target:batch) if(target!=protected_unit->As_Target()) {
+            auto unit=Member(target,&w.AI);
+            if(unit->Mission!=MISSION_GUARD || Target_Legal(unit->NavCom)) held=false;
+        }
+        check(held,"reserve processing leaves cancelled frontline tanks guarding in place");
+        auto reused=batch.back(); LLMBridge::Object_Created(reused);
+        check(!Frontline_Reserve(plan,reused,&w.AI),"a reused unit slot cannot inherit the frontline reservation");
+        TacticalStates[0].NextForcedAttempt=0; w.Tick(false,3);
+        check(plan.Forced && plan.Home%MAP_CELL_W>=57,"a fresh numerical plan resumes at the front instead of the construction yard");
+        bool forward=true;
+        for(auto target:batch) if(target!=protected_unit->As_Target() && target!=reused) {
+            auto unit=Member(target,&w.AI);
+            if(unit->Mission==MISSION_MOVE && (unit->NavCom&0x7fffffffu)%MAP_CELL_W<55) forward=false;
+        }
+        check(forward,"resumed frontline tanks receive forward destinations");
+    }
+    {
+        World w; StrikePlan & plan=FrontWave(w,12); FrontUpdate(w);
+        auto original=As_Techno(plan.Target);
+        w.Building(w.Enemy,90,80,STRUCT_REFINERY);
+        const_cast<TechnoTypeClass *>(Units.Data.back()->Class)->Cost=10000;
+        original->Strength=0; FrontUpdate(w);
+        check(plan.Phase!=STRIKE_HOLD && plan.Target!=original->As_Target() && plan.Home%MAP_CELL_W>=57,
+            "retargeting uses the frontline batch rather than an expensive reinforcement at the base");
+    }
+    {
+        World w; auto target=w.Building(w.Enemy,90,43,STRUCT_REFINERY);
+        w.Building(w.Enemy,88,43,STRUCT_TURRET,3000,true);
+        StrikePlan & plan=FrontWave(w,4,false,target); FrontUpdate(w);
+        check(plan.Marchers.empty(),"an underpowered arrived group has not yet formed a march batch");
+        Cancel(plan,&w.AI,"rally_timeout");
+        check(plan.FrontlineCell%MAP_CELL_W>=60,"a waiting frontline is retained even before the first batch is strong enough to march");
+        Frame+=5*TICKS_PER_SECOND;
+        std::vector<Fighter> army; std::vector<Contact> contacts; std::vector<TARGET> defenders;
+        Gather(&w.AI,army,contacts);
+        check(Start_Strike(plan,&w.AI,army,contacts,defenders,false) && plan.Home%MAP_CELL_W>=57,
+            "an ordinary restart also retains the front and its reserve across in-place plan replacement");
+    }
+    {
+        World w; StrikePlan & strike=FrontWave(w,12); FrontUpdate(w);
+        auto target=As_Techno(strike.Target);
+        auto plan=ModelPlan(w); ModelOrder(plan,LLM::GROUND,LLM::ATTACK_TARGET,target); Deliver(w,plan);
+        check(strike.External && strike.Home%MAP_CELL_W>=57,
+            "a model replacement attack retains the existing frontline rally");
+        check(!strike.FrontlineReserve.empty(),"model plan preparation preserves survivors held by the later cancellation");
     }
     std::cout<<checks<<" tactical route, policy and actual controller scenarios passed.\n";
 }

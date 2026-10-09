@@ -498,10 +498,16 @@ class HouseClass {
 		bool AI_Economic_Has_Income(void) const;
 		bool AI_Economic_Kennel_Ready(void) const;
 		bool AI_Economic_MCV_Ready(void);
+		int AI_Economic_MCV_Budget(void);
+		bool AI_Economic_Storage_Priority(void) const;
 		int AI_Economic_Reserve(void) const;
 		int AI_Economic_Cash(void) const;
 		int AI_Economic_Combat_Budget(void) const;
+		int AI_Economic_Recovery_Reserve(void) const;
+		int AI_Economic_Military_Reserve(void) const;
+		bool AI_Economic_Combat_Priority(void) const;
 		StructType AI_Economic_Building(void);
+		StructType AI_Essential_Building(void);
 		COORDINATE AI_Economic_Location(BuildingClass const * building) const;
 		void AI_CalcDynamics(void);
 		AIStrategy::EnemyForces AI_Enemy_Forces(void) const;

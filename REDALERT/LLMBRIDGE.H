@@ -13,6 +13,8 @@ void Shutdown();
 void New_Match(unsigned int & low, unsigned int & high);
 void Object_Created(unsigned int target);
 unsigned int Object_Generation(unsigned int target);
+// Wall time is independent of the simulation speed; unsigned subtraction wraps safely.
+unsigned int Milliseconds();
 bool Publish(std::string const & snapshot);
 // A new malformed packet is consumed and returned with invalid=true.
 bool Receive(LLM::Plan & plan, bool & invalid);

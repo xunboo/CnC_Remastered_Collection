@@ -3,6 +3,7 @@
 #define LLMPROTOCOL_H
 
 #include <cstring>
+#include <climits>
 #include <map>
 #include <string>
 
@@ -10,7 +11,8 @@
 // little-endian packet and independently validates every reference and action.
 namespace LLM {
 enum {
-    ProtocolVersion = 1, MaxOrders = 3, MaxPlanTicks = 450,
+    ProtocolVersion = 2, MaxOrders = 3, MaxPlanTicks = 450,
+    MaxSnapshotAgeMillis = 125000, MaxSnapshotHistory = 1024,
     MappingVersion = 2,
     HeaderBytes = 64, SnapshotBytes = 262144, CommandBytes = 512, LogPathBytes = 4096,
     LogPathOffset = HeaderBytes + SnapshotBytes + CommandBytes,
@@ -36,7 +38,7 @@ struct Plan {
     unsigned int MatchHigh;
     int SnapshotSeq;
     int House;
-    int ExpiresAt;
+    int ValidForTicks;
     int Count;
     Order Orders[MaxOrders];
 };
@@ -63,7 +65,8 @@ inline bool Decode(void const * bytes, unsigned int length, Plan & plan)
     std::memcpy(&plan, bytes, length);
     if (plan.Magic != PlanMagic || plan.Version != ProtocolVersion || plan.Count < 0
         || plan.Count > MaxOrders || length != 32u + 32u * plan.Count
-        || plan.SnapshotSeq <= 0 || plan.House < 0 || plan.ExpiresAt < 0) return false;
+        || plan.SnapshotSeq <= 0 || plan.House < 0
+        || plan.ValidForTicks < 1 || plan.ValidForTicks > MaxPlanTicks) return false;
     unsigned int groups = 0;
     for (int i = 0; i < plan.Count; ++i) {
         Order const & order = plan.Orders[i];
@@ -85,11 +88,13 @@ inline bool Decode(void const * bytes, unsigned int length, Plan & plan)
     return true;
 }
 inline bool Fresh(Plan const & plan, unsigned int low, unsigned int high, int house,
-    int frame, int captured_frame, int last_applied_seq)
+    int frame, int captured_frame, int last_applied_seq, unsigned int snapshot_age_millis)
 {
     return plan.MatchLow == low && plan.MatchHigh == high && plan.House == house
         && plan.SnapshotSeq > last_applied_seq && captured_frame >= 0 && captured_frame <= frame
-        && frame < plan.ExpiresAt && (long long)plan.ExpiresAt - captured_frame <= MaxPlanTicks;
+        && snapshot_age_millis <= MaxSnapshotAgeMillis
+        && plan.ValidForTicks >= 1 && plan.ValidForTicks <= MaxPlanTicks
+        && (long long)frame + plan.ValidForTicks <= INT_MAX;
 }
 
 // Construction hooks catch even death/reallocation within one simulation frame.

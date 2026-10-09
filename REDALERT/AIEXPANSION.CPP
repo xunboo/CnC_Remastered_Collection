@@ -17,10 +17,21 @@ struct EconomyState {
     int LastFrame, NextScan, NextExpansion, Inventory, DrySince, KennelUntil;
     int RefineryCell, ExpansionCell, SiloGoal;
     int FactoryCount, SiloCount, FactoryCell, StorageCell, BaseRefineryCell;
+    unsigned LastHarvested, MilitarySeen;
+    int IncomeFrame, IncomePerMinute, StorageReserve, StorageLimit;
+    long long StorageGrowthBudget;
+    int IncomeEpoch[AIExpansion::IncomeBuckets];
+    long long IncomeCredits[AIExpansion::IncomeBuckets];
+    int EssentialCells[6];
     bool RemoteRefinery, Income, OreAvailable;
     EconomyState() : Owner(NULL), LastFrame(-1), NextScan(0), NextExpansion(0), Inventory(-1), DrySince(-1), KennelUntil(0),
         RefineryCell(-1), ExpansionCell(-1), SiloGoal(0), FactoryCount(-1), SiloCount(-1),
-        FactoryCell(-2), StorageCell(-2), BaseRefineryCell(-2), RemoteRefinery(false), Income(false), OreAvailable(false) {}
+        FactoryCell(-2), StorageCell(-2), BaseRefineryCell(-2), LastHarvested(0), MilitarySeen(0),
+        IncomeFrame(-1), IncomePerMinute(0), StorageReserve(0), StorageLimit(0), StorageGrowthBudget(0),
+        RemoteRefinery(false), Income(false), OreAvailable(false) {
+        for (int i = 0; i < AIExpansion::IncomeBuckets; ++i) { IncomeEpoch[i] = -1; IncomeCredits[i] = 0; }
+        for (int i = 0; i < 6; ++i) EssentialCells[i] = -2;
+    }
 };
 struct DeployState {
     UnitClass const * Owner;
@@ -414,23 +425,70 @@ static int Working_Harvesters(HouseClass const * house)
     }
     return count;
 }
+struct MilitaryBudget {
+    int Army, Goal, Replenishment;
+};
+static MilitaryBudget Military_Budget(HouseClass const * house)
+{
+    HouseClass * quantities = const_cast<HouseClass *>(house);
+    int vehicles = AIStrategy::Combat_Unit_Count(house->CurUnits, quantities->QuantityU(UNIT_HARVESTER), quantities->QuantityU(UNIT_MCV));
+    int infantry = house->CurInfantry, aircraft = house->CurAircraft, vessels = house->CurVessels;
+    // New requests already have their full price deducted from economic cash.
+    // Count those reinforcements once, before their native objects are created.
+    FactoryClass const * factory = house->Fetch_Factory(RTTI_UNITTYPE);
+    if (house->BuildUnit != UNIT_NONE && house->BuildUnit != UNIT_HARVESTER && house->BuildUnit != UNIT_MCV
+        && (!factory || !factory->Get_Object())) ++vehicles;
+    factory = house->Fetch_Factory(RTTI_INFANTRYTYPE);
+    if (house->BuildInfantry != INFANTRY_NONE && (!factory || !factory->Get_Object())) ++infantry;
+    factory = house->Fetch_Factory(RTTI_AIRCRAFTTYPE);
+    if (house->BuildAircraft != AIRCRAFT_NONE && (!factory || !factory->Get_Object())) ++aircraft;
+    factory = house->Fetch_Factory(RTTI_VESSELTYPE);
+    if (house->BuildVessel != VESSEL_NONE && (!factory || !factory->Get_Object())) ++vessels;
+    AIStrategy::EnemyForces enemy = house->AI_Enemy_Forces();
+    MilitaryBudget budget;
+    budget.Army = vehicles + infantry / 4 + aircraft / 2 + vessels;
+    budget.Goal = (int)min(12LL, max(6LL, (long long)enemy.Armor + enemy.Infantry / 4 + (long long)enemy.Aircraft * 2 + enemy.Vessels));
+    budget.Replenishment = (int)min((long long)INT_MAX,
+        (long long)max(0, budget.Goal - budget.Army) * max(400, Tank_Cost(house)));
+    return budget;
+}
 static int Reserve(HouseClass const * house)
 {
     int reserve = max(1200, Tank_Cost(house) * 2) + BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of();
     if (const_cast<HouseClass *>(house)->QuantityU(UNIT_HARVESTER) < 2) reserve += UnitTypeClass::As_Reference(UNIT_HARVESTER).Cost_Of();
     return reserve;
 }
+static void Observe_Income(EconomyState & state, HouseClass const * house)
+{
+    int epoch = Frame / (TICKS_PER_SECOND * AIExpansion::IncomeBucketSeconds);
+    int slot = epoch % AIExpansion::IncomeBuckets;
+    if (state.IncomeEpoch[slot] != epoch) { state.IncomeEpoch[slot] = epoch; state.IncomeCredits[slot] = 0; }
+    // The native ledger includes the configured AI income boost and credits
+    // discarded at full capacity. Spending and refunds do not distort this rate.
+    unsigned gained = house->HarvestedCredits - state.LastHarvested;
+    if (state.IncomeFrame >= 0 && gained <= INT_MAX)
+        state.IncomeCredits[slot] = min((long long)INT_MAX, state.IncomeCredits[slot] + gained);
+    state.LastHarvested = house->HarvestedCredits; state.IncomeFrame = Frame;
+    long long recent = 0;
+    for (int i = 0; i < AIExpansion::IncomeBuckets; ++i)
+        if (state.IncomeEpoch[i] >= 0 && epoch - state.IncomeEpoch[i] < AIExpansion::IncomeBuckets) recent += state.IncomeCredits[i];
+    state.IncomePerMinute = (int)min((long long)INT_MAX, recent);
+    StructType const military[] = {STRUCT_RADAR, STRUCT_SOVIET_TECH, STRUCT_ADVANCED_TECH};
+    for (int i = 0; i < 3; ++i) if (const_cast<HouseClass *>(house)->QuantityB(military[i]) > 0) state.MilitarySeen |= 1u << i;
+}
 static EconomyState & Scan(HouseClass const * house, bool force = false)
 {
     EconomyState & state = Economies[house->Class->House];
     if (state.Owner != house || Frame < state.LastFrame) { state = EconomyState(); state.Owner = house; }
     state.LastFrame = Frame;
+    Observe_Income(state, house);
     int inventory = const_cast<HouseClass *>(house)->QuantityB(STRUCT_CONST) + const_cast<HouseClass *>(house)->QuantityB(STRUCT_REFINERY) * 32 + const_cast<HouseClass *>(house)->QuantityU(UNIT_MCV) * 1024 + const_cast<HouseClass *>(house)->QuantityU(UNIT_HARVESTER) * 32768;
     int factories = const_cast<HouseClass *>(house)->QuantityB(STRUCT_WEAP);
     int silos = const_cast<HouseClass *>(house)->QuantityB(STRUCT_STORAGE);
     if (!force && Frame < state.NextScan && inventory == state.Inventory && factories == state.FactoryCount && silos == state.SiloCount) return state;
     state.FactoryCount = factories; state.SiloCount = silos;
     state.FactoryCell = state.StorageCell = state.BaseRefineryCell = -2;
+    for (int i = 0; i < 6; ++i) state.EssentialCells[i] = -2;
     state.NextScan = Frame + TICKS_PER_SECOND * AIExpansion::ScanSeconds; state.Inventory = inventory;
     state.RefineryCell = state.ExpansionCell = -1; state.RemoteRefinery = state.Income = false;
     TravelMap terrain(MAP_CELL_W, MAP_CELL_H); std::vector<unsigned char> unsafe;
@@ -473,7 +531,9 @@ static EconomyState & Scan(HouseClass const * house, bool force = false)
         .Boolean("ore_available", state.OreAvailable).Boolean("remote_refinery", state.RemoteRefinery)
         .Number("refinery_cell", state.RefineryCell).Number("expansion_cell", state.ExpansionCell)
         .Number("dry_since", state.DrySince).Number("next_expansion", state.NextExpansion)
-        .Number("factory_count", state.FactoryCount).Number("silo_count", state.SiloCount).Number("silo_goal", state.SiloGoal));
+        .Number("factory_count", state.FactoryCount).Number("silo_count", state.SiloCount).Number("silo_goal", state.SiloGoal)
+        .Number("income_per_minute", state.IncomePerMinute).Number("storage_limit", state.StorageLimit)
+        .Number("storage_military_reserve", state.StorageReserve));
     return state;
 }
 static int Factory_Plot(HouseClass const * house, BuildingTypeClass const & type)
@@ -602,7 +662,8 @@ bool HouseClass::AI_Economic_Kennel_Ready(void) const
         && AI_Economic_Cash() >= AI_Economic_Reserve() + BuildingTypeClass::As_Reference(STRUCT_KENNEL).Cost_Of();
 }
 
-bool HouseClass::AI_Economic_MCV_Ready(void)
+// Check the non-cash requirements without purchasing an MCV or starting its cooldown.
+int HouseClass::AI_Economic_MCV_Budget(void)
 {
     AI_Refresh_Economy();
     int guards = AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV])
@@ -612,52 +673,134 @@ bool HouseClass::AI_Economic_MCV_Ready(void)
         || !Can_Build(&UnitTypeClass::As_Reference(UNIT_MCV), ActLike)
         || guards < 6
         || (int)BQuantity[STRUCT_CONST] + (int)UQuantity[UNIT_MCV] >= AIExpansion::Base_Limit(this)
-        || (int)CurBuildings + 4 > AIMaxBuildings) return false;
-    int budget = UnitTypeClass::As_Reference(UNIT_MCV).Cost_Of() + BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() + Reserve(this);
-    if (AI_Economic_Cash() < budget) return false;
+        || (int)CurBuildings + 4 > AIMaxBuildings) return 0;
     EconomyState & state = Scan(this);
-    if (!state.Income || state.ExpansionCell < 0 || Frame < state.NextExpansion) return false;
-    state.NextExpansion = Frame + TICKS_PER_MINUTE * AIExpansion::ExpansionMinutes;
+    if (!state.Income || state.ExpansionCell < 0 || Frame < state.NextExpansion) return 0;
+    return UnitTypeClass::As_Reference(UNIT_MCV).Cost_Of() + BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() + Reserve(this);
+}
+
+bool HouseClass::AI_Economic_MCV_Ready(void)
+{
+    int budget = AI_Economic_MCV_Budget();
+    if (budget <= 0 || AI_Economic_Cash() < budget) return false;
+    Scan(this).NextExpansion = Frame + TICKS_PER_MINUTE * AIExpansion::ExpansionMinutes;
     return true;
+}
+
+bool HouseClass::AI_Economic_Storage_Priority(void) const
+{
+    return Enabled(this) && Scan(this).StorageGrowthBudget > 0;
+}
+
+StructType HouseClass::AI_Essential_Building(void)
+{
+    if (!Enabled(this)) return STRUCT_NONE;
+    EconomyState & state = Scan(this);
+    bool vehicles = AIWarFactoryLimit > 0 && AIMaxTanksNr > 0;
+    bool infantry = AIBarracksLimit > 0 && AIMaxInfantryNr > 0;
+    bool military = vehicles || infantry || AIMaxAirNr > 0 || BuildVessel != VESSEL_NONE;
+    bool capped = (int)CurBuildings >= AIMaxBuildings
+        || (HumanBuildingCount > 0 && (int)CurBuildings >= max(12, HumanBuildingCount * Rule.AIBuildingsMultiplier));
+    StructType const types[] = {STRUCT_WEAP, STRUCT_BARRACKS, STRUCT_TENT,
+        STRUCT_RADAR, STRUCT_SOVIET_TECH, STRUCT_ADVANCED_TECH};
+    bool needed[] = {vehicles && BQuantity[STRUCT_WEAP] == 0,
+        infantry && BQuantity[STRUCT_BARRACKS] + BQuantity[STRUCT_TENT] == 0,
+        infantry && BQuantity[STRUCT_BARRACKS] + BQuantity[STRUCT_TENT] == 0,
+        military && BQuantity[STRUCT_RADAR] == 0 && (state.MilitarySeen || (int)CurBuildings >= AIMaxBuildings),
+        military && BQuantity[STRUCT_SOVIET_TECH] + BQuantity[STRUCT_ADVANCED_TECH] == 0
+            && ((state.MilitarySeen & 2) || ((int)CurBuildings >= AIMaxBuildings && BQuantity[STRUCT_RADAR] > 0)),
+        military && BQuantity[STRUCT_SOVIET_TECH] + BQuantity[STRUCT_ADVANCED_TECH] == 0
+            && ((state.MilitarySeen & 4) || ((int)CurBuildings >= AIMaxBuildings && BQuantity[STRUCT_RADAR] > 0))};
+    int money = AI_Economic_Cash();
+    int reserve = UQuantity[UNIT_HARVESTER] == 0 && !IsTiberiumShort
+        ? UnitTypeClass::As_Reference(UNIT_HARVESTER).Cost_Of() : 0;
+    for (int i = 0; i < 6; ++i) {
+        BuildingTypeClass const & type = BuildingTypeClass::As_Reference(types[i]);
+        if (!needed[i] || !Can_Build(&type, ActLike) || (long long)money < (long long)type.Cost_Of() + reserve) continue;
+        if (state.EssentialCells[i] == -2) state.EssentialCells[i] = Factory_Plot(this, type);
+        StructType investment = Invest(this, type, money, reserve, state.EssentialCells[i]);
+        if (investment != STRUCT_NONE) {
+            AILog::Record(Frame, Class->House, "essential_recovery", AILog::Fields().Number("structure", types[i])
+                .Number("selected", investment).Boolean("base_limit_reached", capped));
+            return investment;
+        }
+    }
+    return STRUCT_NONE;
+}
+
+static long long Storage_Cash_Ceiling(HouseClass const * house)
+{
+    return max(0LL, (long long)house->Available_Money() - house->Tiberium) + max(0L, house->Capacity);
+}
+
+static void Storage_Growth_Target(HouseClass const * house, EconomyState & state, long long budget, int buildings)
+{
+    BuildingTypeClass const & storage = BuildingTypeClass::As_Reference(STRUCT_STORAGE);
+    long long shortfall = budget - Storage_Cash_Ceiling(house);
+    if (shortfall <= 0 || house->Capacity <= 0 || storage.Capacity <= 0) return;
+    long long silos = (shortfall + storage.Capacity - 1) / storage.Capacity;
+    if ((long long)house->CurBuildings + silos + buildings > house->AIMaxBuildings) return;
+    if (!state.StorageGrowthBudget || budget < state.StorageGrowthBudget) state.StorageGrowthBudget = budget;
+}
+
+static StructType Storage_Investment(HouseClass * house, EconomyState & state, int money, int reserve)
+{
+    BuildingTypeClass const & storage = BuildingTypeClass::As_Reference(STRUCT_STORAGE);
+    int count = house->QuantityB(STRUCT_STORAGE);
+    state.SiloGoal = count; state.StorageReserve = reserve;
+    state.StorageLimit = (int)min((long long)INT_MAX,
+        (long long)count + max(0LL, (long long)house->AIMaxBuildings - house->CurBuildings));
+    if (house->Capacity <= 0 || storage.Capacity <= 0 || state.IncomePerMinute <= 0
+        || count >= state.StorageLimit
+        || (long long)money < (long long)storage.Cost_Of() + reserve) return STRUCT_NONE;
+    if ((long long)house->Power < (long long)house->Drain + storage.Drain
+        && (long long)house->CurBuildings + 2 > house->AIMaxBuildings) return STRUCT_NONE;
+    MilitaryBudget military = Military_Budget(house);
+    long long incoming = (long long)state.IncomePerMinute * AIExpansion::StorageForecastSeconds / 60;
+    long long committed = max(0LL, (long long)house->Available_Money() - money);
+    long long buffer = max(0LL, incoming - committed);
+    long long free = max(0LL, (long long)house->Capacity - house->Tiberium);
+    long long shortfall = max(0LL, state.StorageGrowthBudget - Storage_Cash_Ceiling(house));
+    if (buffer <= free && shortfall == 0) return STRUCT_NONE;
+    // Reinforcement funds are reserved above, not subtracted again from future
+    // income. A funded army and construction queue can operate concurrently.
+    state.SiloGoal = (int)min((long long)state.StorageLimit,
+        (long long)count + (max(buffer - free, shortfall) + storage.Capacity - 1) / storage.Capacity);
+    AILog::Record(Frame, house->Class->House, "storage_decision", AILog::Fields().Number("income_per_minute", state.IncomePerMinute)
+        .Number("army", military.Army).Number("army_goal", military.Goal).Number("military_reserve", state.StorageReserve)
+        .Number("free_capacity", free).Number("forecast_surplus", buffer).Number("silo_count", count)
+        .Number("silo_goal", state.SiloGoal).Number("silo_limit", state.StorageLimit)
+        .Number("growth_budget", state.StorageGrowthBudget).Number("cash_ceiling", Storage_Cash_Ceiling(house))
+        .Boolean("growth_priority", state.StorageGrowthBudget > 0));
+    return Invest(house, storage, money, state.StorageReserve, Infrastructure_Plot(house, storage));
 }
 
 StructType HouseClass::AI_Economic_Building(void)
 {
     AI_Refresh_Economy();
     if (!Enabled(this) || Power < Drain) return STRUCT_NONE;
-    BuildingTypeClass const & recovery = BuildingTypeClass::As_Reference(STRUCT_WEAP);
-    int truck_reserve = UQuantity[UNIT_HARVESTER] == 0 && !IsTiberiumShort ? UnitTypeClass::As_Reference(UNIT_HARVESTER).Cost_Of() : 0;
-    if (BQuantity[STRUCT_WEAP] == 0 && AIWarFactoryLimit > 0 && Can_Build(&recovery, ActLike)
-        && AI_Economic_Cash() >= recovery.Cost_Of() + truck_reserve && Infrastructure_Plot(this, recovery) >= 0) return STRUCT_WEAP;
+    StructType recovery = AI_Essential_Building();
+    if (recovery != STRUCT_NONE) return recovery;
     if (IsTiberiumShort) return STRUCT_NONE;
     EconomyState & state = Scan(this);
+    state.StorageGrowthBudget = 0;
     if (!state.Income || Working_Harvesters(this) == 0) return STRUCT_NONE;
-    int money = AI_Economic_Cash(), reserve = AI_Economic_Reserve();
-    BuildingTypeClass const & storage = BuildingTypeClass::As_Reference(STRUCT_STORAGE);
-    bool full = Capacity > 0 && (long long)Tiberium * 100 >= (long long)Capacity * AIExpansion::StoragePercent;
-    if (full || BQuantity[STRUCT_STORAGE] > 0) state.SiloGoal = AIExpansion::CoreMinimum;
-    if (state.SiloGoal > 0 && Capacity > 0 && storage.Capacity > 0
-        && ((int)BQuantity[STRUCT_STORAGE] < state.SiloGoal
-            || (long long)Capacity - Tiberium < (long long)storage.Capacity * AIExpansion::StorageBuffer)) {
-        if (money >= storage.Cost_Of() + reserve && Can_Build(&storage, ActLike)) {
-            StructType investment = Invest(this, storage, money, reserve, Infrastructure_Plot(this, storage));
-            if (investment != STRUCT_NONE) return investment;
-        }
-    }
+    int money = AI_Economic_Cash(), reserve = AI_Economic_Military_Reserve();
     BuildingTypeClass const & refinery = BuildingTypeClass::As_Reference(STRUCT_REFINERY);
     bool late = Late_Economy(this);
     if (late && AIRefineryLimit > 0 && BQuantity[STRUCT_REFINERY] < AIExpansion::CoreMinimum
-        && Can_Build(&refinery, ActLike) && (long long)money >= (long long)refinery.Cost_Of() + reserve) {
+        && Can_Build(&refinery, ActLike) && (long long)money >= (long long)refinery.Cost_Of() + AI_Economic_Reserve()) {
         int plot = state.RefineryCell >= 0 ? state.RefineryCell : Infrastructure_Plot(this, refinery);
-        StructType investment = Invest(this, refinery, money, reserve, plot);
+        StructType investment = Invest(this, refinery, money, AI_Economic_Reserve(), plot);
         if (investment != STRUCT_NONE) return investment;
     }
     BuildingTypeClass const & factory = BuildingTypeClass::As_Reference(STRUCT_WEAP);
-    if (late && AIWarFactoryLimit > 0 && AIMaxTanksNr > 0 && Tank_Cost(this) > 0
+    bool core_factory = late && AIWarFactoryLimit > 0 && AIMaxTanksNr > 0 && Tank_Cost(this) > 0
         && BQuantity[STRUCT_WEAP] > 0 && BQuantity[STRUCT_WEAP] < AIExpansion::CoreMinimum
         && BQuantity[STRUCT_REFINERY] >= AIExpansion::CoreMinimum && Working_Harvesters(this) >= 2
-        && Can_Build(&factory, ActLike)
-        && (long long)money >= (long long)factory.Cost_Of() + reserve + Tank_Cost(this) * BQuantity[STRUCT_WEAP]) {
+        && Can_Build(&factory, ActLike);
+    long long factory_budget = (long long)factory.Cost_Of() + reserve + (long long)Tank_Cost(this) * BQuantity[STRUCT_WEAP];
+    if (core_factory && money >= factory_budget) {
         StructType investment = Invest(this, factory, money, reserve + Tank_Cost(this) * BQuantity[STRUCT_WEAP], Infrastructure_Plot(this, factory));
         if (investment != STRUCT_NONE) return investment;
     }
@@ -668,11 +811,11 @@ StructType HouseClass::AI_Economic_Building(void)
     int count = BQuantity[STRUCT_WEAP];
     int speed_limit = NewUnitsEnabled && Rule.AIAftermathfastbuild == 0 ? 2 : AIWarFactoryLimit;
     bool tanks = AIPersonalStrategyMode == 1 || AIPersonalStrategyMode == 2 || AIPersonalStrategyMode == 6 || AIStrategy::Armor_Pressure(AI_Enemy_Forces());
-    if (count >= 1 && count < AIWarFactoryLimit && count < speed_limit && tanks && Tank_Cost(this) > 0
+    bool extra_factory = count >= 1 && count < AIWarFactoryLimit && count < speed_limit && tanks && Tank_Cost(this) > 0
         && (int)BQuantity[STRUCT_REFINERY] > count && (int)UQuantity[UNIT_HARVESTER] > count
         && AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]) + 6 < AIMaxTanksNr
-        && Can_Build(&factory, ActLike) && (long long)Power >= (long long)Drain + factory.Drain
-        && money >= factory.Cost_Of() + reserve + Tank_Cost(this) * count
+        && Can_Build(&factory, ActLike) && (long long)Power >= (long long)Drain + factory.Drain;
+    if (extra_factory && money >= factory_budget
         && Factory_Plot(this, factory) >= 0) return STRUCT_WEAP;
     BuildingTypeClass const & repair = BuildingTypeClass::As_Reference(STRUCT_REPAIR);
     int expansion_budget = UnitTypeClass::As_Reference(UNIT_MCV).Cost_Of() + refinery.Cost_Of() + reserve;
@@ -682,7 +825,16 @@ StructType HouseClass::AI_Economic_Building(void)
         && AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]) >= 6
         && Can_Build(&repair, ActLike) && money >= repair.Cost_Of() + expansion_budget
         && Factory_Plot(this, repair) >= 0) return STRUCT_REPAIR;
-    return STRUCT_NONE;
+    // Buy the storage needed to reach an otherwise eligible growth budget.
+    // Already funded infrastructure still takes precedence above.
+    if ((core_factory || extra_factory) && Storage_Cash_Ceiling(this) < factory_budget
+        && (long long)Power >= (long long)Drain + factory.Drain && Infrastructure_Plot(this, factory) >= 0)
+        Storage_Growth_Target(this, state, factory_budget, 1);
+    if (BQuantity[STRUCT_REPAIR] > 0) {
+        int mcv_budget = AI_Economic_MCV_Budget();
+        if (mcv_budget > 0) Storage_Growth_Target(this, state, mcv_budget, 4);
+    }
+    return Storage_Investment(this, state, money, reserve);
 }
 
 int HouseClass::AI_Economic_Cash(void) const
@@ -710,9 +862,56 @@ int HouseClass::AI_Economic_Cash(void) const
 int HouseClass::AI_Economic_Combat_Budget(void) const
 {
     int money = AI_Economic_Cash();
+    int reserve = AI_Economic_Recovery_Reserve();
     if (Enabled(this) && (UQuantity[UNIT_MCV] > 0 || BuildUnit == UNIT_MCV))
-        money -= BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() + BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of();
-    return max(0, money);
+        reserve = max(reserve, BuildingTypeClass::As_Reference(STRUCT_REFINERY).Cost_Of() + BuildingTypeClass::As_Reference(STRUCT_POWER).Cost_Of());
+    return max(0, money - reserve);
+}
+
+int HouseClass::AI_Economic_Recovery_Reserve(void) const
+{
+    if (!Enabled(this) || IsTiberiumShort) return 0;
+    int reserve = 0;
+    UnitTypeClass const & harvester = UnitTypeClass::As_Reference(UNIT_HARVESTER);
+    if (IQ >= Rule.IQHarvester && Rule.AIHarvesterMaxLimit > 0 && BQuantity[STRUCT_REFINERY] > 0
+        && UQuantity[UNIT_HARVESTER] < min(2, (int)Rule.AIHarvesterMaxLimit)
+        && BuildUnit != UNIT_HARVESTER) {
+        if (BQuantity[STRUCT_WEAP] > 0 && Can_Build(&harvester, ActLike)) reserve = harvester.Cost_Of();
+        else if (BQuantity[STRUCT_WEAP] == 0 && AIWarFactoryLimit > 0) {
+            BuildingTypeClass const & factory = BuildingTypeClass::As_Reference(STRUCT_WEAP);
+            if (Can_Build(&factory, ActLike)) reserve = (int)min((long long)INT_MAX,
+                (long long)harvester.Cost_Of() + factory.Cost_Of());
+        }
+    }
+    BuildingTypeClass const & refinery = BuildingTypeClass::As_Reference(STRUCT_REFINERY);
+    if (AIRefineryLimit > 0 && BuildStructure != STRUCT_REFINERY && (int)CurBuildings < AIMaxBuildings
+        && Can_Build(&refinery, ActLike)) {
+        if (BQuantity[STRUCT_REFINERY] == 0) reserve = max(reserve, refinery.Cost_Of());
+        else if (Late_Economy(this) && BQuantity[STRUCT_REFINERY] < AIExpansion::CoreMinimum && Working_Harvesters(this) > 0) {
+            EconomyState const & state = Scan(this);
+            int plot = state.RefineryCell >= 0 ? state.RefineryCell : Infrastructure_Plot(this, refinery);
+            if (state.Income && plot >= 0) reserve = (int)max((long long)reserve,
+                min((long long)INT_MAX, (long long)refinery.Cost_Of() + AI_Economic_Reserve()));
+        }
+    }
+    return reserve;
+}
+
+int HouseClass::AI_Economic_Military_Reserve(void) const
+{
+    if (!Enabled(this)) return 0;
+    MilitaryBudget military = Military_Budget(this);
+    return max(AI_Economic_Recovery_Reserve(), (int)min((long long)INT_MAX,
+        (long long)AI_Economic_Reserve() + military.Replenishment));
+}
+
+bool HouseClass::AI_Economic_Combat_Priority(void) const
+{
+    if (!Enabled(this) || IsTiberiumShort || BQuantity[STRUCT_REFINERY] == 0 || Working_Harvesters(this) == 0
+        || AIStrategy::Combat_Unit_Count(CurUnits, UQuantity[UNIT_HARVESTER], UQuantity[UNIT_MCV]) >= AIMaxTanksNr) return false;
+    MilitaryBudget military = Military_Budget(this);
+    int cost = Tank_Cost(this);
+    return military.Army < min(6, military.Goal / 2) && cost > 0 && AI_Economic_Combat_Budget() >= cost;
 }
 
 int HouseClass::AI_Economic_Reserve(void) const
